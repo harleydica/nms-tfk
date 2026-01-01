@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>Interface Traffic</title>
+  <link rel="icon" type="image/png" href="/icon-192x192.png">
 
   <style>
     body {
@@ -107,6 +108,7 @@ import { INTERFACES } from './config.js';
 
 const iface = new URLSearchParams(location.search).get("iface") || "unknown";
 
+document.title = `TFK - ${iface}`;
 document.getElementById("title").textContent = iface;
 document.getElementById("desc").textContent = iface;
 document.getElementById("ifname").textContent = iface;
