@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NMS Interface Traffic</title>
+<style>
+body {
+  font-family: serif;
+  background: #fff;
+  margin: 0;
+  padding: 0;
+  color: #000;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 20px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #ccc;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.logo img {
+  height: 40px;
+  width: auto;
+}
+
+.ip-address {
+  font-size: 14px;
+  color: #666;
+}
+
+h1 {
+  text-align: center;
+  font-size: 28px;
+  margin: 20px 0;
+}
+
+.container {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.graph-item {
+  border: 1px solid #ccc;
+  padding: 10px;
+  background: #f9f9f9;
+}
+
+.graph-item h2 {
+  font-size: 14px;
+  margin: 0 0 8px 0;
+  font-weight: bold;
+}
+
+.graph-item img {
+  width: 100%;
+  display: block;
+  border: 1px solid #999;
+  cursor: pointer;
+}
+
+.graph-item a {
+  display: inline-block;
+  margin-top: 8px;
+  color: #0066cc;
+  text-decoration: none;
+  font-size: 12px;
+}
+
+.graph-item a:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 900px) {
+  .container {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <img src="/icon-192x192.png" alt="Logo">
+    <span>NMS - TFK HOME-YGK</span>
+  </div>
+  <div class="ip-address">Your IP Address: <span id="userip">Loading...</span></div>
+</div>
+
+<h1>Interface Traffic - Graphs</h1>
+<div id="list" class="container"></div>
+
+<script type="module">
+import { INTERFACES } from "./config.js";
+
+// Get user IP address
+fetch('/api/ip')
+  .then(res => res.json())
+  .then(data => {
+    document.getElementById('userip').textContent = data.ip || 'Unknown';
+  })
+  .catch(() => {
+    document.getElementById('userip').textContent = 'Unknown';
+  });
+
+const root = document.getElementById("list");
+
+Object.keys(INTERFACES).forEach(iface => {
+  const ifaceData = INTERFACES[iface];
+  
+  const div = document.createElement("div");
+  div.className = "graph-item";
+  
+  div.innerHTML = `
+    <h2>${iface}</h2>
+    <a href="interface.html?iface=${encodeURIComponent(iface)}" style="display: block;">
+      <img src="/api/iface/${encodeURIComponent(iface)}/graph/daily" alt="${iface} daily graph">
+    </a>
+    <a href="interface.html?iface=${encodeURIComponent(iface)}">View Details →</a>
+  `;
+  
+  root.appendChild(div);
+});
+</script>
+
+</body>
+</html>

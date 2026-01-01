@@ -1,0 +1,175 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Interface Traffic</title>
+
+  <style>
+    body {
+      font-family: serif;
+      background: #fff;
+      color: #000;
+      margin: 20px;
+    }
+
+    h1 {
+      font-size: 32px;
+      margin-bottom: 10px;
+    }
+
+    .meta table {
+      margin-bottom: 15px;
+    }
+
+    .meta td {
+      padding: 2px 10px;
+      font-size: 16px;
+      vertical-align: top;
+    }
+
+    .separator {
+      border-top: 2px solid #aaa;
+      margin: 15px 0;
+    }
+
+    .section {
+      margin-top: 25px;
+    }
+
+    img {
+      display: block;
+      margin: 10px 0;
+      border: 1px solid #999;
+    }
+
+    table.stats {
+      border-collapse: collapse;
+      margin-top: 5px;
+    }
+
+    table.stats td {
+      padding: 2px 12px;
+      font-size: 15px;
+      white-space: nowrap;
+    }
+
+    .label {
+      font-weight: bold;
+    }
+
+    /* SAMAKAN WARNA IN & OUT */
+    .in {
+      color: #00cc00;
+      font-weight: normal;
+    }
+
+    .out {
+      color: #0000cc;
+      font-weight: normal;
+    }
+
+    .footer {
+      margin-top: 40px;
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ================= HEADER ================= -->
+
+<h1 id="title"></h1>
+
+<div class="meta">
+  <table>
+    <tr><td>System:</td><td><strong>NMS in TFK HOME-YGK</strong></td></tr>
+    <tr><td>Maintainer:</td><td><strong>mail@taufikcrisnawan.dev</strong></td></tr>
+    <tr><td>Description:</td><td><strong id="desc"></strong></td></tr>
+    <tr><td>ifType:</td><td id="iftype">—</td></tr>
+    <tr><td>ifName:</td><td id="ifname"></td></tr>
+    <tr><td>Max Speed:</td><td id="maxspeed">—</td></tr>
+    <tr><td>IP:</td><td id="ip">-</td></tr>
+  </table>
+</div>
+
+<div class="separator"></div>
+
+<div id="content"></div>
+
+<div class="footer">
+  <a href="index.html">← Return to Home</a>
+</div>
+
+<!-- ================= SCRIPT ================= -->
+
+<script type="module">
+import { INTERFACES } from './config.js';
+
+const iface = new URLSearchParams(location.search).get("iface") || "unknown";
+
+document.getElementById("title").textContent = iface;
+document.getElementById("desc").textContent = iface;
+document.getElementById("ifname").textContent = iface;
+
+// Load interface data from config
+const ifaceData = INTERFACES[iface];
+if (ifaceData) {
+  document.getElementById("ip").textContent = ifaceData.ip || "-";
+  document.getElementById("desc").textContent = ifaceData.description || iface;
+  document.getElementById("iftype").textContent = ifaceData.ifType;
+  document.getElementById("maxspeed").textContent = ifaceData.maxSpeed;
+}
+
+const sections = [
+  ["daily",   "Daily Graph (5 Minute Average)"],
+  ["weekly",  "Weekly Graph (30 Minute Average)"],
+  ["monthly", "Monthly Graph (2 Hour Average)"],
+  ["yearly",  "Yearly Graph (1 Day Average)"]
+];
+
+function graphUrl(type) {
+  return `/api/iface/${encodeURIComponent(iface)}/graph/${type}`;
+}
+
+async function load() {
+  const res = await fetch(`/api/iface/${encodeURIComponent(iface)}/stats`);
+  const stats = await res.json();
+
+  const root = document.getElementById("content");
+  root.innerHTML = "";
+
+  sections.forEach(([key, title]) => {
+    const s = stats[key];
+    if (!s) return;
+
+    const div = document.createElement("div");
+    div.className = "section";
+
+    div.innerHTML = `
+      <h2>${title}</h2>
+      <img src="${graphUrl(key)}">
+      <table class="stats">
+        <tr>
+          <td class="label in">In</td>
+          <td>Max ${s.in?.max || "-"}</td>
+          <td>Avg ${s.in?.avg || "-"}</td>
+          <td>Cur ${s.in?.current || "-"}</td>
+        </tr>
+        <tr>
+          <td class="label out">Out</td>
+          <td>Max ${s.out?.max || "-"}</td>
+          <td>Avg ${s.out?.avg || "-"}</td>
+          <td>Cur ${s.out?.current || "-"}</td>
+        </tr>
+      </table>
+    `;
+
+    root.appendChild(div);
+  });
+}
+
+load();
+</script>
+
+</body>
+</html>
