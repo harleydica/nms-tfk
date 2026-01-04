@@ -23,6 +23,12 @@ export const INTERFACES = {
   maxSpeed: "1G",
   ip: "192.168.101.2 (No DNS name)"
   },
+  "bridge-IXP": {
+  description: "Karyasija IX",
+  ifType: "bridge (7)",
+  maxSpeed: "1G",
+  ip: "172.16.12.1 (No DNS name)"
+  },
   "ether4-to-SURYA": {
   description: "downstream to SURYA 10Mbps",
   ifType: "ethernetCsmacd (6)",
