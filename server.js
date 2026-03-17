@@ -612,7 +612,7 @@ app.get("/api/iface/:iface/graph/:type", (req, res) => {
     let ifIndex = null;
     const lines = stdout.split("\n").filter((l) => l.trim());
     lines.forEach((line) => {
-      const match = line.match(/\.(\d+)\s*=\s*STRING\s*"([^"]*)/);
+      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]*)/);
       if (match && match[2] === iface) {
         ifIndex = match[1];
       }
