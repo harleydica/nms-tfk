@@ -129,7 +129,7 @@ function toSafeFilename(value) {
 let collectorTimer = null;
 let interfaceIndexMap = {}; // Cache: ifName -> ifIndex
 let cachedInterfaces = []; // Cache: detailed interface list
-let lastInterfaceChangeTime = 0; // Track when interfaces last changed
+let lastInterfaceChangeTime = Date.now(); // Track when interfaces last changed (init to now to avoid SNMP on first cycle)
 
 function parseIfDescrLine(line) {
   const match = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]+)"/);
@@ -820,22 +820,12 @@ app.get("/api/interfaces", (req, res) => {
 
 /**
  * GET /api/interfaces/detailed
- * Ambil detail interface dari cache, fallback ke database (tidak pernah SNMP)
+ * Ambil detail interface dari cache (INSTANT, tidak pernah SNMP)
+ * Cache di-update setiap 30 menit atau saat startup
  */
 app.get("/api/interfaces/detailed", (req, res) => {
-  // Return memori cache jika tersedia (fastest)
-  if (cachedInterfaces.length > 0) {
-    return res.json(cachedInterfaces);
-  }
-
-  // Fallback: load dari database jika cache belum ready (e.g., startup)
-  loadInterfacesFromDB((err, interfaces) => {
-    if (err) {
-      console.error("Failed to load interfaces from DB:", err.message);
-      return res.json([]);
-    }
-    res.json(interfaces || []);
-  });
+  // Return cache immediately (no SNMP, no database)
+  res.json(cachedInterfaces);
 });
 
 /**
