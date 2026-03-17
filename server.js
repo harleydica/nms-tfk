@@ -316,6 +316,11 @@ function regenerateAllGraphs(callback) {
   let completed = 0;
   const total = files.length * timespans.length;
 
+  if (total === 0) {
+    if (callback) callback();
+    return;
+  }
+
   files.forEach((file) => {
     const rrdPath = path.join(RRD_DIR, file);
     const match = file.match(/(\d+)_/);
@@ -330,6 +335,9 @@ function regenerateAllGraphs(callback) {
         completed++;
         if (err) {
           console.error(`Error regenerating ${ifIndex}_${timespan}:`, err.message);
+        } else {
+          // Console log for debug
+          console.log(`✓ Cached: ${ifIndex}_${timespan}.png`);
         }
         if (completed === total && callback) {
           callback();
@@ -337,8 +345,6 @@ function regenerateAllGraphs(callback) {
       });
     });
   });
-
-  if (total === 0 && callback) callback();
 }
 
 function runCollectorCycle() {
@@ -379,12 +385,8 @@ function runCollectorCycle() {
     });
   });
 
-  // Regenerate all graphs after collector cycle completes
-  setTimeout(() => {
-    regenerateAllGraphs(() => {
-      console.log("Graph cache regenerated");
-    });
-  }, 2000);
+  // Regenerate all graphs immediately after collector cycle
+  regenerateAllGraphs();
 }
 
 function startCollector() {
@@ -413,13 +415,11 @@ function bootstrapRrdFromSnmp() {
 
     console.log(`Bootstrap completed: ${interfaces.length} interfaces prepared`);
 
-    // Generate initial graph cache after short delay
-    setTimeout(() => {
-      console.log("Generating initial graph cache...");
-      regenerateAllGraphs(() => {
-        console.log("Initial graph cache generated");
-      });
-    }, 3000);
+    // Generate initial graph cache immediately (non-blocking)
+    console.log("Generating initial graph cache...");
+    regenerateAllGraphs(() => {
+      console.log("✓ Initial graph cache ready");
+    });
   });
 }
 
@@ -969,8 +969,18 @@ app.listen(PORT, () => {
 
   // Initialize database
   initDatabase();
+  
+  // Bootstrap and generate cache
   bootstrapRrdFromSnmp();
   startCollector();
+
+  // Pre-generate graphs cache every 5 minutes
+  setInterval(() => {
+    console.log("Pre-generating graph cache...");
+    regenerateAllGraphs(() => {
+      console.log("Graph cache updated");
+    });
+  }, 300000); // 5 minutes
 });
 
 export default app;
