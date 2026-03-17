@@ -317,9 +317,12 @@ function regenerateAllGraphs(callback) {
   const total = files.length * timespans.length;
 
   if (total === 0) {
+    console.log("⚠️  No RRD files found for cache generation");
     if (callback) callback();
     return;
   }
+
+  console.log(`🔄 Starting cache generation for ${total} graphs...`);
 
   files.forEach((file) => {
     const rrdPath = path.join(RRD_DIR, file);
@@ -334,12 +337,10 @@ function regenerateAllGraphs(callback) {
       generateGraph(rrdPath, graphPath, `Traffic: ${ifName}`, timespan, (err) => {
         completed++;
         if (err) {
-          console.error(`Error regenerating ${ifIndex}_${timespan}:`, err.message);
-        } else {
-          // Console log for debug
-          console.log(`✓ Cached: ${ifIndex}_${timespan}.png`);
+          console.error(`❌ Error: ${ifIndex}_${timespan}: ${err.message}`);
         }
         if (completed === total && callback) {
+          console.log(`✓ Cache generation complete (${completed}/${total})`);
           callback();
         }
       });
@@ -587,6 +588,7 @@ function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
 
   cmd.on("close", (code) => {
     if (code === 0) {
+      console.log(`📊 Generated: ${path.basename(graphPath)}`);
       callback(null);
     } else {
       callback(new Error(stderr || `rrdtool graph failed`));
@@ -769,10 +771,20 @@ app.get("/api/collectorstart", (req, res) => {
 
 /**
  * GET /api/graph/:ifIndex/:timespan
- * Generate graph untuk interface (atau serve from cache)
+ * Serve cached graph atau generate baru jika tidak ada
  */
 app.get("/api/graph/:ifIndex/:timespan", (req, res) => {
   const { ifIndex, timespan } = req.params;
+  const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${timespan}.png`);
+
+  // Serve cached graph jika ada
+  if (fs.existsSync(graphPath)) {
+    console.log(`⚡ Cache HIT: ${ifIndex}_${timespan}.png`);
+    return res.sendFile(graphPath, { root: "." });
+  }
+
+  // Jika belum ada cache, generate sekarang
+  console.log(`⏳ Cache MISS: Generating ${ifIndex}_${timespan}.png`);
   const files = fs.readdirSync(RRD_DIR);
   const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
 
@@ -780,18 +792,6 @@ app.get("/api/graph/:ifIndex/:timespan", (req, res) => {
     return res.status(404).json({ error: "RRD file not found" });
   }
 
-  const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${timespan}.png`);
-
-  // Check if cached graph exists and is recent (less than 5 minutes old)
-  if (fs.existsSync(graphPath)) {
-    const stat = fs.statSync(graphPath);
-    const ageMs = Date.now() - stat.mtimeMs;
-    if (ageMs < 300000) {  // 5 minutes = 300000ms
-      return res.sendFile(graphPath, { root: "." });
-    }
-  }
-
-  // Generate fresh graph if cache doesn't exist or is too old
   const rrdPath = path.join(RRD_DIR, rrdFile);
   const ifName = rrdFile.replace(/^\d+_/, "").replace(/\.rrd$/, "");
 
@@ -887,8 +887,7 @@ app.get("/api/iface/:iface/stats", (req, res) => {
 
 /**
  * GET /api/iface/:iface/graph/:type
- * Compatibility endpoint untuk interface.html (lama)
- * Generate graph berdasarkan nama interface (atau serve from cache)
+ * Serve cached graph atau generate baru (compatibility endpoint)
  */
 app.get("/api/iface/:iface/graph/:type", (req, res) => {
   const { iface, type } = req.params;
@@ -917,7 +916,15 @@ app.get("/api/iface/:iface/graph/:type", (req, res) => {
       return res.status(404).json({ error: "Interface not found" });
     }
 
-    // Cari file RRD berdasarkan ifIndex
+    const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${type}.png`);
+
+    // Serve cached graph jika ada
+    if (fs.existsSync(graphPath)) {
+      responseSent = true;
+      return res.sendFile(graphPath, { root: "." });
+    }
+
+    // Jika belum ada cache, generate sekarang
     const files = fs.readdirSync(RRD_DIR);
     const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
 
@@ -926,21 +933,8 @@ app.get("/api/iface/:iface/graph/:type", (req, res) => {
       return res.status(404).json({ error: "RRD file not found" });
     }
 
-    const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${type}.png`);
-    const timespan = type === "daily" ? "1day" : (type === "weekly" ? "7day" : (type === "monthly" ? "30day" : "1year"));
-
-    // Check if cached graph exists and is recent
-    if (fs.existsSync(graphPath)) {
-      const stat = fs.statSync(graphPath);
-      const ageMs = Date.now() - stat.mtimeMs;
-      if (ageMs < 300000) {  // 5 minutes = 300000ms
-        responseSent = true;
-        return res.sendFile(graphPath, { root: "." });
-      }
-    }
-
-    // Generate fresh graph if cache doesn't exist or is too old
     const rrdPath = path.join(RRD_DIR, rrdFile);
+    const timespan = type === "daily" ? "1day" : (type === "weekly" ? "7day" : (type === "monthly" ? "30day" : "1year"));
 
     generateGraph(rrdPath, graphPath, `Traffic: ${iface}`, timespan, (err) => {
       if (responseSent) return;
