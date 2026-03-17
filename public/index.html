@@ -152,7 +152,15 @@
         }
 
         root.innerHTML = "";
-        interfaces.forEach((itf) => {
+        
+        // Sort interfaces by description (title)
+        const sortedInterfaces = interfaces.sort((a, b) => {
+          const descA = (a.interfaceDescription || a.ifName || "").toUpperCase();
+          const descB = (b.interfaceDescription || b.ifName || "").toUpperCase();
+          return descA.localeCompare(descB);
+        });
+        
+        sortedInterfaces.forEach((itf) => {
           const ifName = itf.ifName || `if-${itf.ifIndex}`;
           const displayName = itf.displayName || `${ifName}-${(itf.interfaceDescription || ifName)}`;
           const descriptionTitle = (itf.interfaceDescription || ifName).toUpperCase();
