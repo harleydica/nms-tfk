@@ -155,12 +155,13 @@
         interfaces.forEach((itf) => {
           const ifName = itf.ifName || `if-${itf.ifIndex}`;
           const displayName = itf.displayName || `${ifName}-${(itf.interfaceDescription || ifName)}`;
+          const descriptionTitle = (itf.interfaceDescription || ifName).toUpperCase();
           const encoded = encodeURIComponent(ifName);
 
           const div = document.createElement("div");
           div.className = "graph-item";
           div.innerHTML = `
-            <h2>${displayName}</h2>
+            <h2>${descriptionTitle}</h2>
             <a href="interface.html?iface=${encoded}" style="display:block;">
               <img src="/api/iface/${encoded}/graph/daily" alt="${displayName} daily graph">
             </a>
