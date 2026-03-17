@@ -1,103 +1,531 @@
 import express from "express";
-import * as cheerio from "cheerio";
+import { spawn } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
+import mysql from "mysql2/promise";
 
 const app = express();
 app.use(express.static("public"));
+app.use(express.json());
 
-const MIKROTIK_HOST = process.env.MIKROTIK_HOST || "http://192.168.20.1";
-const MT_USER = process.env.MT_USER || "";
-const MT_PASS = process.env.MT_PASS || "";
+// Configuration
+const SNMP_HOST = process.env.SNMP_HOST || "172.17.100.1";
+const SNMP_COMMUNITY = process.env.SNMP_COMMUNITY || "public";
+const SNMP_VERSION = process.env.SNMP_VERSION || "2c";
+const RRD_DIR = process.env.RRD_DIR || "./rrd";
+const GRAPH_DIR = process.env.GRAPH_DIR || "./public/graphs";
+
+// Database Configuration
+const DB_CONFIG = {
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "nms",
+  password: process.env.DB_PASS || "nms123",
+  database: process.env.DB_NAME || "nms_db",
+  waitForConnections: true,
+  connectionLimit: 5,
+  queueLimit: 0
+};
+
+// Create necessary directories
+if (!fs.existsSync(RRD_DIR)) fs.mkdirSync(RRD_DIR, { recursive: true });
+if (!fs.existsSync(GRAPH_DIR)) fs.mkdirSync(GRAPH_DIR, { recursive: true });
+
+// ============================================
+// SNMP HELPERS
+// ============================================
 
 /**
- * Optional Basic Auth (kalau Mikrotik kamu pakai basic auth).
- * Kalau Mikrotik kamu pakai cookie/login form, lebih baik buat user/IP allow untuk akses graph.
+ * Jalankan SNMP command
  */
-function authHeaders() {
-  if (!MT_USER || !MT_PASS) return {};
-  const b64 = Buffer.from(`${MT_USER}:${MT_PASS}`).toString("base64");
-  return { Authorization: `Basic ${b64}` };
-}
+function snmpWalk(oid, callback) {
+  const cmd = spawn("snmpwalk", [
+    "-v", SNMP_VERSION,
+    "-c", SNMP_COMMUNITY,
+    SNMP_HOST,
+    oid
+  ]);
 
-async function mtFetch(path, opts = {}) {
-  const url = `${MIKROTIK_HOST}${path}`;
-  const res = await fetch(url, {
-    ...opts,
-    headers: { ...authHeaders(), ...(opts.headers || {}) }
+  let stdout = "";
+  let stderr = "";
+
+  cmd.stdout.on("data", (data) => {
+    stdout += data.toString();
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`MikroTik fetch failed ${res.status} ${res.statusText} :: ${url}\n${text.slice(0, 200)}`);
-  }
-  return res;
+
+  cmd.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  cmd.on("close", (code) => {
+    if (code === 0) {
+      callback(null, stdout);
+    } else {
+      callback(new Error(stderr || `snmpwalk failed with code ${code}`), null);
+    }
+  });
+
+  cmd.on("error", (err) => {
+    callback(err, null);
+  });
 }
 
-/** Parse angka statistik dari HTML graph page */
-function parseStatsFromHtml(html) {
-  const $ = cheerio.load(html);
+function snmpGet(oid, callback) {
+  const cmd = spawn("snmpget", [
+    "-v", SNMP_VERSION,
+    "-c", SNMP_COMMUNITY,
+    SNMP_HOST,
+    oid
+  ]);
 
-  // Text full body (lebih stabil untuk regex)
-  const bodyText = $("body").text().replace(/\r/g, "");
+  let stdout = "";
+  let stderr = "";
 
-  // Helper: ambil blok text untuk sebuah section (Daily/Weekly/Monthly/Yearly)
-  function extractSection(label) {
-    // Mikrotik biasanya punya "Daily" Graph (5 Minute Average), dst.
-    // Kita ambil chunk dari label sampai label berikutnya (atau akhir).
-    const labels = ['"Daily" Graph', '"Weekly" Graph', '"Monthly" Graph', '"Yearly" Graph'];
-    const start = bodyText.indexOf(label);
-    if (start < 0) return "";
+  cmd.stdout.on("data", (data) => {
+    stdout += data.toString();
+  });
 
-    const nextLabels = labels.filter(l => l !== label);
-    let end = bodyText.length;
-    for (const nl of nextLabels) {
-      const idx = bodyText.indexOf(nl, start + label.length);
-      if (idx > -1 && idx < end) end = idx;
+  cmd.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  cmd.on("close", (code) => {
+    if (code === 0) {
+      callback(null, stdout);
+    } else {
+      callback(new Error(stderr || `snmpget failed with code ${code}`), null);
     }
-    return bodyText.slice(start, end);
+  });
+
+  cmd.on("error", (err) => {
+    callback(err, null);
+  });
+}
+
+// ============================================
+// RRDtool HELPERS
+// ============================================
+
+/**
+ * Buat RRD file untuk interface
+ */
+function createRRD(rrdPath, callback) {
+  if (fs.existsSync(rrdPath)) {
+    callback(null);
+    return;
   }
 
-  // Helper: parse baris "Max In: ...; Average In: ...; Current In: ...;"
-  function parseInOut(sectionText) {
-    const cleaned = sectionText.replace(/\s+/g, " ");
+  const cmd = spawn("rrdtool", [
+    "create",
+    rrdPath,
+    "--step", "300", // 5 minutes
+    `DS:InOctets:COUNTER:600:0:U`,
+    `DS:OutOctets:COUNTER:600:0:U`,
+    `DS:InErrors:COUNTER:600:0:U`,
+    `DS:OutErrors:COUNTER:600:0:U`,
+    `RRA:AVERAGE:0.5:1:2880`,      // 5min avg, 1 day
+    `RRA:AVERAGE:0.5:12:2016`,     // 1hr avg, 1 month
+    `RRA:AVERAGE:0.5:288:1440`,    // 1day avg, 1 year
+    `RRA:MAX:0.5:1:2880`,          // 5min max, 1 day
+    `RRA:MAX:0.5:12:2016`          // 1hr max, 1 month
+  ]);
 
-    const inLine = cleaned.match(/Max In:\s*([^;]+);\s*Average In:\s*([^;]+);\s*Current In:\s*([^;]+);/i);
-    const outLine = cleaned.match(/Max Out:\s*([^;]+);\s*Average Out:\s*([^;]+);\s*Current Out:\s*([^;]+);/i);
+  let stderr = "";
+  cmd.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
 
-    return {
-      in: inLine ? { max: inLine[1].trim(), avg: inLine[2].trim(), current: inLine[3].trim() } : null,
-      out: outLine ? { max: outLine[1].trim(), avg: outLine[2].trim(), current: outLine[3].trim() } : null
-    };
-  }
+  cmd.on("close", (code) => {
+    if (code === 0) {
+      callback(null);
+    } else {
+      callback(new Error(stderr || `rrdtool create failed`));
+    }
+  });
 
-  const daily = parseInOut(extractSection('"Daily" Graph'));
-  const weekly = parseInOut(extractSection('"Weekly" Graph'));
-  const monthly = parseInOut(extractSection('"Monthly" Graph'));
-  const yearly = parseInOut(extractSection('"Yearly" Graph'));
-
-  return { daily, weekly, monthly, yearly };
+  cmd.on("error", (err) => {
+    callback(err);
+  });
 }
 
 /**
- * API: ambil statistik (Max/Average/Current) dari halaman HTML mikrotik.
- * GET /api/iface/:iface/stats
+ * Update RRD dengan data SNMP
  */
-app.get("/api/iface/:iface/stats", async (req, res) => {
+function updateRRD(rrdPath, inOctets, outOctets, inErrors, outErrors, callback) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const rrdupdate = `${timestamp}:${inOctets}:${outOctets}:${inErrors}:${outErrors}`;
+
+  const cmd = spawn("rrdtool", ["update", rrdPath, rrdupdate]);
+
+  let stderr = "";
+  cmd.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  cmd.on("close", (code) => {
+    if (code === 0) {
+      callback(null);
+    } else {
+      callback(new Error(stderr || `rrdtool update failed`));
+    }
+  });
+
+  cmd.on("error", (err) => {
+    callback(err);
+  });
+}
+
+/**
+ * Generate graph dari RRD
+ */
+function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
+  const graphParams = {
+    "1day": ["-s", "-1d", "-w", "1200", "-h", "600"],
+    "7day": ["-s", "-7d", "-w", "1200", "-h", "600"],
+    "30day": ["-s", "-30d", "-w", "1200", "-h", "600"],
+    "1year": ["-s", "-1y", "-w", "1200", "-h", "600"]
+  };
+
+  const timeParams = graphParams[timespan] || graphParams["1day"];
+
+  const cmd = spawn("rrdtool", [
+    "graph",
+    graphPath,
+    ...timeParams,
+    "--title", title,
+    "--vertical-label", "bits/sec",
+    "--right-axis-label", "Errors/sec",
+    `DEF:inOctets=${rrdPath}:InOctets:AVERAGE`,
+    `DEF:outOctets=${rrdPath}:OutOctets:AVERAGE`,
+    `DEF:inErrors=${rrdPath}:InErrors:AVERAGE`,
+    `DEF:outErrors=${rrdPath}:OutErrors:AVERAGE`,
+    `CDEF:inBits=inOctets,8,*`,
+    `CDEF:outBits=outOctets,8,*`,
+    `AREA:inBits#00CC00:"In Traffic"`,
+    `LINE2:outBits#0000FF:"Out Traffic"`,
+    `LINE2:inErrors#FF0000:"In Errors"`,
+    `LINE2:outErrors#FFAA00:"Out Errors"`
+  ]);
+
+  let stderr = "";
+  cmd.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  cmd.on("close", (code) => {
+    if (code === 0) {
+      callback(null);
+    } else {
+      callback(new Error(stderr || `rrdtool graph failed`));
+    }
+  });
+
+  cmd.on("error", (err) => {
+    callback(err);
+  });
+}
+
+// ============================================
+// DATABASE HELPERS
+// ============================================
+
+async function getDBConnection() {
   try {
-    const iface = req.params.iface;
-    const r = await mtFetch(`/graphs/iface/${encodeURIComponent(iface)}/`);
-    const html = await r.text();
-    const stats = parseStatsFromHtml(html);
-    res.json({ iface, ...stats });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
+    return await mysql.createConnection(DB_CONFIG);
+  } catch (err) {
+    console.error("DB Connection Error:", err.message);
+    throw err;
   }
+}
+
+async function initDatabase() {
+  try {
+    const conn = await getDBConnection();
+    
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS interfaces (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        ifIndex INT UNIQUE NOT NULL,
+        ifName VARCHAR(255) NOT NULL,
+        ifType INT,
+        ifMtu INT,
+        ifSpeed BIGINT,
+        ifDescription VARCHAR(500),
+        ifAlias VARCHAR(500),
+        enabled BOOLEAN DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS traffic_stats (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        ifIndex INT NOT NULL,
+        timestamp DATETIME NOT NULL,
+        inOctets BIGINT,
+        outOctets BIGINT,
+        inErrors INT,
+        outErrors INT,
+        FOREIGN KEY (ifIndex) REFERENCES interfaces(ifIndex),
+        INDEX idx_timestamp (timestamp),
+        INDEX idx_ifIndex (ifIndex)
+      )
+    `);
+
+    await conn.end();
+    console.log("Database initialized successfully");
+  } catch (err) {
+    console.error("Database initialization error:", err.message);
+  }
+}
+
+// ============================================
+// API ENDPOINTS
+// ============================================
+
+/**
+ * GET /api/interfaces
+ * Ambil semua interface dari router via SNMP
+ */
+app.get("/api/interfaces", (req, res) => {
+  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    const interfaces = {};
+    const lines = stdout.split("\n").filter((l) => l.trim());
+
+    lines.forEach((line) => {
+      // Parse: SNMPv2-SMI::ifAlias.1 = STRING "eth0"
+      const match = line.match(/SNMPv2-SMI::if\w+\.(\d+)\s*=\s*(?:STRING|INTEGER)\s+"?([^"]+)"?/);
+      if (match) {
+        const ifIndex = match[1];
+        const ifName = match[2];
+        if (!interfaces[ifIndex]) interfaces[ifIndex] = {};
+        interfaces[ifIndex].ifIndex = ifIndex;
+        interfaces[ifIndex].ifName = ifName;
+      }
+    });
+
+    res.json(Object.values(interfaces));
+  });
 });
 
 /**
- * API: get client IP address
- * GET /api/ip
+ * GET /api/interfaces/detailed
+ * Ambil detail interface (dengan speed, type, dll)
  */
-app.get("/api/ip", (req, res) => {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0] || 
+app.get("/api/interfaces/detailed", (req, res) => {
+  const details = [];
+  let completed = 0;
+  let total = 0;
+
+  snmpWalk("1.3.6.1.2.1.2.2.1.5", (err, stdout) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    const lines = stdout.split("\n").filter((l) => l.trim());
+    total = lines.length;
+
+    if (total === 0) {
+      return res.json([]);
+    }
+
+    lines.forEach((line) => {
+      const match = line.match(/(\d+)\s*=\s*INTEGER\s*(\d+)/);
+      if (match) {
+        const ifIndex = match[1];
+        details.push({ ifIndex });
+      }
+    });
+
+    // Get names
+    snmpWalk("1.3.6.1.2.1.2.2.1.2", (err2, stdout2) => {
+      if (err2) {
+        return res.status(500).json({ error: err2.message });
+      }
+
+      const nameLines = stdout2.split("\n").filter((l) => l.trim());
+      nameLines.forEach((line) => {
+        const match = line.match(/\.(\d+)\s*=\s*STRING\s*"([^"]+)"/);
+        if (match) {
+          const ifIndex = match[1];
+          const ifName = match[2];
+          const iface = details.find((d) => d.ifIndex === ifIndex);
+          if (iface) iface.ifName = ifName;
+        }
+      });
+
+      res.json(details);
+    });
+  });
+});
+
+/**
+ * GET /api/interfaces/:ifIndex/status
+ * Ambil status interface saat ini
+ */
+app.get("/api/interfaces/:ifIndex/status", (req, res) => {
+  const { ifIndex } = req.params;
+
+  // OID untuk InOctets, OutOctets, InErrors, OutErrors
+  const oids = {
+    inOctets: `1.3.6.1.2.1.2.2.1.10.${ifIndex}`,
+    outOctets: `1.3.6.1.2.1.2.2.1.16.${ifIndex}`,
+    inErrors: `1.3.6.1.2.1.2.2.1.14.${ifIndex}`,
+    outErrors: `1.3.6.1.2.1.2.2.1.20.${ifIndex}`
+  };
+
+  const results = {};
+  let completed = 0;
+
+  Object.entries(oids).forEach(([key, oid]) => {
+    snmpGet(oid, (err, stdout) => {
+      if (!err && stdout) {
+        const match = stdout.match(/=\s*(?:INTEGER|Counter32)\s*(\d+)/);
+        if (match) {
+          results[key] = parseInt(match[1]);
+        }
+      }
+      completed++;
+      if (completed === Object.keys(oids).length) {
+        res.json(results);
+      }
+    });
+  });
+});
+
+/**
+ * POST /api/interfaces/:ifIndex/monitor
+ * Enable monitoring untuk interface tertentu
+ */
+app.post("/api/interfaces/:ifIndex/monitor", (req, res) => {
+  const { ifIndex } = req.params;
+  const { ifName } = req.body;
+
+  const rrdPath = path.join(RRD_DIR, `${ifIndex}_${ifName}.rrd`);
+
+  createRRD(rrdPath, (err) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    // Save to database
+    getDBConnection().then((conn) => {
+      conn
+        .execute(
+          `INSERT INTO interfaces (ifIndex, ifName, enabled) 
+           VALUES (?, ?, 1) 
+           ON DUPLICATE KEY UPDATE enabled = 1`,
+          [ifIndex, ifName]
+        )
+        .then(() => {
+          conn.end();
+          res.json({ success: true, message: `Monitoring enabled for ${ifName}` });
+        })
+        .catch((err) => {
+          conn.end();
+          res.status(500).json({ error: err.message });
+        });
+    });
+  });
+});
+
+/**
+ * GET /api/collectorstart
+ * Jalankan data collection untuk semua interface yang di-monitor
+ */
+app.get("/api/collectorstart", (req, res) => {
+  res.json({ message: "Collector started. Check logs for updates." });
+
+  // Jalankan collection setiap 5 menit
+  setInterval(() => {
+    const files = fs.readdirSync(RRD_DIR).filter((f) => f.endsWith(".rrd"));
+
+    files.forEach((file) => {
+      const rrdPath = path.join(RRD_DIR, file);
+      const match = file.match(/(\d+)_/);
+      if (!match) return;
+
+      const ifIndex = match[1];
+
+      // Ambil data current
+      snmpGet(`1.3.6.1.2.1.2.2.1.10.${ifIndex}`, (err1, stdout1) => {
+        if (err1) return;
+
+        snmpGet(`1.3.6.1.2.1.2.2.1.16.${ifIndex}`, (err2, stdout2) => {
+          if (err2) return;
+
+          snmpGet(`1.3.6.1.2.1.2.2.1.14.${ifIndex}`, (err3, stdout3) => {
+            if (err3) return;
+
+            snmpGet(`1.3.6.1.2.1.2.2.1.20.${ifIndex}`, (err4, stdout4) => {
+              if (err4) return;
+
+              const inOctets = parseInt(stdout1.match(/=\s*(\d+)/)?.[1] || 0);
+              const outOctets = parseInt(stdout2.match(/=\s*(\d+)/)?.[1] || 0);
+              const inErrors = parseInt(stdout3.match(/=\s*(\d+)/)?.[1] || 0);
+              const outErrors = parseInt(stdout4.match(/=\s*(\d+)/)?.[1] || 0);
+
+              updateRRD(rrdPath, inOctets, outOctets, inErrors, outErrors, (err) => {
+                if (err) {
+                  console.error(`Error updating ${file}:`, err.message);
+                } else {
+                  console.log(`Updated ${file}`);
+                }
+              });
+            });
+          });
+        });
+      });
+    });
+  }, 300000); // 5 minutes
+});
+
+/**
+ * GET /api/graph/:ifIndex/:timespan
+ * Generate graph untuk interface
+ */
+app.get("/api/graph/:ifIndex/:timespan", (req, res) => {
+  const { ifIndex, timespan } = req.params;
+  const files = fs.readdirSync(RRD_DIR);
+  const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
+
+  if (!rrdFile) {
+    return res.status(404).json({ error: "RRD file not found" });
+  }
+
+  const rrdPath = path.join(RRD_DIR, rrdFile);
+  const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${timespan}.png`);
+  const ifName = rrdFile.replace(/^\d+_/, "").replace(/\.rrd$/, "");
+
+  generateGraph(rrdPath, graphPath, `Traffic: ${ifName}`, timespan, (err) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.sendFile(graphPath, { root: "." });
+  });
+});
+
+// ============================================
+// START SERVER
+// ============================================
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`\n📊 NMS Server started on http://localhost:${PORT}`);
+  console.log(`📍 SNMP Host: ${SNMP_HOST}`);
+  console.log(`📁 RRD Dir: ${RRD_DIR}`);
+  console.log(`📁 Graph Dir: ${GRAPH_DIR}\n`);
+
+  // Initialize database
+  initDatabase();
+});
+
+export default app; 
              req.socket.remoteAddress || 
              req.ip;
   res.json({ ip: ip.replace('::ffff:', '') });
