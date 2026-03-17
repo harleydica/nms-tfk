@@ -154,7 +154,7 @@
         root.innerHTML = "";
         interfaces.forEach((itf) => {
           const ifName = itf.ifName || `if-${itf.ifIndex}`;
-          const displayName = itf.interfaceDescription || ifName;
+          const displayName = itf.displayName || `${ifName}-${(itf.interfaceDescription || ifName)}`;
           const encoded = encodeURIComponent(ifName);
 
           const div = document.createElement("div");

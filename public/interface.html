@@ -129,10 +129,12 @@ fetch("/api/interfaces/detailed")
       : null;
     if (!current) return;
 
+    const displayName = current.displayName || `${current.ifName}-${current.interfaceDescription || current.ifName}`;
+
     if (current.interfaceDescription) {
-      document.getElementById("desc").textContent = current.interfaceDescription;
-      document.getElementById("title").textContent = current.interfaceDescription;
-      document.title = `TFK - ${current.interfaceDescription}`;
+      document.getElementById("desc").textContent = displayName;
+      document.getElementById("title").textContent = displayName;
+      document.title = `TFK - ${displayName}`;
     }
 
     if (current.speedrate) {

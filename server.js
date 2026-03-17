@@ -18,6 +18,23 @@ const SNMP_COMMUNITY = process.env.SNMP_COMMUNITY || "public";
 const SNMP_VERSION = process.env.SNMP_VERSION || "2c";
 const RRD_DIR = process.env.RRD_DIR || "./rrd";
 const GRAPH_DIR = process.env.GRAPH_DIR || "./public/graphs";
+const MONITOR_INTERFACES = (process.env.MONITOR_INTERFACES || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const INTERFACE_DESCRIPTION_OVERRIDES = (process.env.INTERFACE_DESCRIPTION_OVERRIDES || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .reduce((acc, item) => {
+    const idx = item.indexOf(":");
+    if (idx > 0) {
+      const key = item.slice(0, idx).trim();
+      const val = item.slice(idx + 1).trim();
+      if (key && val) acc[key] = val;
+    }
+    return acc;
+  }, {});
 
 // Database Configuration
 const DB_CONFIG = {
@@ -122,6 +139,15 @@ function parseCounterValue(stdout) {
   return match ? parseInt(match[1], 10) : 0;
 }
 
+function toDisplaySuffix(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "") || "na";
+}
+
 function getInterfacesFromSnmp(callback) {
   snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
     if (err || !stdout) {
@@ -138,10 +164,14 @@ function getInterfacesFromSnmp(callback) {
 
     const byIndex = {};
     interfaces.forEach((itf) => {
+      if (MONITOR_INTERFACES.length && !MONITOR_INTERFACES.includes(itf.ifName)) {
+        return;
+      }
       byIndex[itf.ifIndex] = {
         ifIndex: itf.ifIndex,
         ifName: itf.ifName,
         interfaceDescription: itf.ifName,
+        displayName: itf.ifName,
         speedrate: "-"
       };
     });
@@ -177,7 +207,17 @@ function getInterfacesFromSnmp(callback) {
             });
         }
 
-        callback(null, Object.values(byIndex));
+        const finalInterfaces = Object.values(byIndex).map((itf) => {
+          const override = INTERFACE_DESCRIPTION_OVERRIDES[itf.ifName];
+          const finalDescription = override || itf.interfaceDescription || itf.ifName;
+          return {
+            ...itf,
+            interfaceDescription: finalDescription,
+            displayName: `${itf.ifName}-${toDisplaySuffix(finalDescription)}`
+          };
+        });
+
+        callback(null, finalInterfaces);
       });
     });
   });
