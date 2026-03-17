@@ -322,18 +322,20 @@ app.get("/api/interfaces", (req, res) => {
  */
 app.get("/api/interfaces/detailed", (req, res) => {
   const details = [];
-  let completed = 0;
-  let total = 0;
+  let responseSent = false;
 
   snmpWalk("1.3.6.1.2.1.2.2.1.5", (err, stdout) => {
+    if (responseSent) return;
+    
     if (err) {
+      responseSent = true;
       return res.status(500).json({ error: err.message });
     }
 
     const lines = stdout.split("\n").filter((l) => l.trim());
-    total = lines.length;
 
-    if (total === 0) {
+    if (lines.length === 0) {
+      responseSent = true;
       return res.json([]);
     }
 
@@ -347,7 +349,10 @@ app.get("/api/interfaces/detailed", (req, res) => {
 
     // Get names
     snmpWalk("1.3.6.1.2.1.2.2.1.2", (err2, stdout2) => {
+      if (responseSent) return;
+      
       if (err2) {
+        responseSent = true;
         return res.status(500).json({ error: err2.message });
       }
 
@@ -362,6 +367,7 @@ app.get("/api/interfaces/detailed", (req, res) => {
         }
       });
 
+      responseSent = true;
       res.json(details);
     });
   });
@@ -520,10 +526,14 @@ app.get("/api/graph/:ifIndex/:timespan", (req, res) => {
  */
 app.get("/api/iface/:iface/stats", (req, res) => {
   const { iface } = req.params;
+  let responseSent = false;
 
   // Cari ifIndex dari nama interface
   snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
+    if (responseSent) return;
+    
     if (err || !stdout) {
+      responseSent = true;
       return res.json({
         daily: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
         weekly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
@@ -542,6 +552,7 @@ app.get("/api/iface/:iface/stats", (req, res) => {
     });
 
     if (!ifIndex) {
+      responseSent = true;
       return res.json({
         daily: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
         weekly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
@@ -561,6 +572,8 @@ app.get("/api/iface/:iface/stats", (req, res) => {
 
     Object.entries(oids).forEach(([key, oid]) => {
       snmpGet(oid, (err, stdout) => {
+        if (responseSent) return;
+        
         if (!err && stdout) {
           const match = stdout.match(/=\s*(?:INTEGER|Counter32)\s*(\d+)/);
           if (match) {
@@ -569,6 +582,7 @@ app.get("/api/iface/:iface/stats", (req, res) => {
         }
         completed++;
         if (completed === Object.keys(oids).length) {
+          responseSent = true;
           const dummyStats = {
             daily: {
               in: { max: `${results.inOctets || 0}`, avg: `${(results.inOctets || 0) / 2}`, current: `${results.inOctets || 0}` },
@@ -601,10 +615,14 @@ app.get("/api/iface/:iface/stats", (req, res) => {
  */
 app.get("/api/iface/:iface/graph/:type", (req, res) => {
   const { iface, type } = req.params;
+  let responseSent = false;
 
   // Cari ifIndex dari nama interface
   snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
+    if (responseSent) return;
+    
     if (err || !stdout) {
+      responseSent = true;
       return res.status(404).json({ error: "Interface not found" });
     }
 
@@ -618,6 +636,7 @@ app.get("/api/iface/:iface/graph/:type", (req, res) => {
     });
 
     if (!ifIndex) {
+      responseSent = true;
       return res.status(404).json({ error: "Interface not found" });
     }
 
@@ -626,6 +645,7 @@ app.get("/api/iface/:iface/graph/:type", (req, res) => {
     const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
 
     if (!rrdFile) {
+      responseSent = true;
       return res.status(404).json({ error: "RRD file not found" });
     }
 
@@ -634,9 +654,13 @@ app.get("/api/iface/:iface/graph/:type", (req, res) => {
     const timespan = type === "daily" ? "1day" : (type === "weekly" ? "7day" : (type === "monthly" ? "30day" : "1year"));
 
     generateGraph(rrdPath, graphPath, `Traffic: ${iface}`, timespan, (err) => {
+      if (responseSent) return;
+      
       if (err) {
+        responseSent = true;
         return res.status(500).json({ error: err.message });
       }
+      responseSent = true;
       res.sendFile(graphPath, { root: "." });
     });
   });
