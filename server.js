@@ -128,6 +128,7 @@ function toSafeFilename(value) {
 
 let collectorTimer = null;
 let interfaceIndexMap = {}; // Cache: ifName -> ifIndex
+let cachedInterfaces = []; // Cache: detailed interface list
 
 function parseIfDescrLine(line) {
   const match = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]+)"/);
@@ -307,6 +308,7 @@ function getInterfacesFromSnmp(callback) {
             };
           });
 
+          cachedInterfaces = finalInterfaces; // Update cache
           callback(null, finalInterfaces);
         });
       });
@@ -317,6 +319,7 @@ function getInterfacesFromSnmp(callback) {
 function regenerateAllGraphs(callback) {
   const files = fs.readdirSync(RRD_DIR).filter((f) => f.endsWith(".rrd"));
   const timespans = ["1day", "7day", "30day", "1year"];
+  
   let completed = 0;
   const total = files.length * timespans.length;
 
@@ -392,6 +395,13 @@ function runCollectorCycle() {
 
   // Regenerate all graphs immediately after collector cycle
   regenerateAllGraphs();
+
+  // Refresh interface cache (update every collector cycle)
+  getInterfacesFromSnmp((err, interfaces) => {
+    if (!err && interfaces) {
+      console.log("✓ Interface cache updated");
+    }
+  });
 }
 
 function startCollector() {
@@ -782,14 +792,17 @@ app.get("/api/interfaces", (req, res) => {
 
 /**
  * GET /api/interfaces/detailed
- * Ambil detail interface (dengan speed, type, dll)
+ * Ambil detail interface (dari cache, update saat discovery)
  */
 app.get("/api/interfaces/detailed", (req, res) => {
+  // Return cached data immediately
+  if (cachedInterfaces.length > 0) {
+    return res.json(cachedInterfaces);
+  }
+
+  // If cache empty, trigger discovery and return empty for now
   getInterfacesFromSnmp((err, interfaces) => {
-    if (err) {
-      return res.json([]);
-    }
-    res.json(interfaces);
+    res.json(interfaces || []);
   });
 });
 
