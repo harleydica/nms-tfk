@@ -87,8 +87,8 @@
   <table>
     <tr><td>System:</td><td><strong>NMS in TFK HOME-YGK</strong></td></tr>
     <tr><td>Maintainer:</td><td><strong>mail@taufikcrisnawan.dev</strong></td></tr>
-    <tr><td>Interface-description:</td><td><strong id="desc"></strong></td></tr>
-    <tr><td>Speedrate:</td><td id="speedrate">—</td></tr>
+    <tr><td>description:</td><td><strong id="desc"></strong></td></tr>
+    <tr><td>speedrate:</td><td id="speedrate">—</td></tr>
     <tr><td>IP:</td><td id="ip">-</td></tr>
   </table>
 </div>
@@ -132,7 +132,7 @@ fetch("/api/interfaces/detailed")
     const displayName = current.displayName || `${current.ifName}-${current.interfaceDescription || current.ifName}`;
 
     if (current.interfaceDescription) {
-      document.getElementById("desc").textContent = displayName;
+      document.getElementById("desc").textContent = current.interfaceDescription;
       document.getElementById("title").textContent = displayName;
       document.title = `TFK - ${displayName}`;
     }
@@ -158,8 +158,8 @@ function toMbpsText(value) {
   const n = Number(value || 0);
   const mbps = n / 1000000;
   if (!Number.isFinite(mbps)) return "-";
-  if (mbps >= 1) return `${mbps.toFixed(2)} Mbps`;
-  return `${(mbps * 1000).toFixed(2)} Kbps`;
+  if (mbps >= 1) return `${mbps.toFixed(1)} Mb/s`;
+  return `${(mbps * 1000).toFixed(1)} kb/s`;
 }
 
 async function load() {
@@ -180,6 +180,12 @@ async function load() {
       <h2>${title}</h2>
       <img src="${graphUrl(key)}">
       <table class="stats">
+        <tr>
+          <td></td>
+          <td><strong>Max</strong></td>
+          <td><strong>Average</strong></td>
+          <td><strong>Current</strong></td>
+        </tr>
         <tr>
           <td class="label in">In</td>
           <td>Max ${toMbpsText(s.in?.max)}</td>

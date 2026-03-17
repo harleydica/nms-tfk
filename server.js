@@ -363,15 +363,72 @@ function updateRRD(rrdPath, inOctets, outOctets, inErrors, outErrors, callback) 
   });
 }
 
+function computeRateSummary(values) {
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (!clean.length) {
+    return { max: 0, avg: 0, current: 0 };
+  }
+  const max = Math.max(...clean);
+  const avg = clean.reduce((a, b) => a + b, 0) / clean.length;
+  const current = clean[clean.length - 1];
+  return { max, avg, current };
+}
+
+function fetchRrdStats(rrdPath, startArg, callback) {
+  const cmd = spawn("rrdtool", ["fetch", rrdPath, "AVERAGE", "-s", startArg]);
+
+  let stdout = "";
+  let stderr = "";
+
+  cmd.stdout.on("data", (data) => {
+    stdout += data.toString();
+  });
+
+  cmd.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  cmd.on("close", (code) => {
+    if (code !== 0) {
+      callback(new Error(stderr || "rrdtool fetch failed"));
+      return;
+    }
+
+    const inBits = [];
+    const outBits = [];
+
+    stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^\d+:/.test(l))
+      .forEach((line) => {
+        const parts = line.replace(/^\d+:\s*/, "").trim().split(/\s+/);
+        const inOct = Number(parts[0]);
+        const outOct = Number(parts[1]);
+        if (Number.isFinite(inOct)) inBits.push(inOct * 8);
+        if (Number.isFinite(outOct)) outBits.push(outOct * 8);
+      });
+
+    callback(null, {
+      in: computeRateSummary(inBits),
+      out: computeRateSummary(outBits)
+    });
+  });
+
+  cmd.on("error", (err) => {
+    callback(err);
+  });
+}
+
 /**
  * Generate graph dari RRD
  */
 function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
   const graphParams = {
-    "1day": ["-s", "-1d", "-w", "520", "-h", "160"],
-    "7day": ["-s", "-7d", "-w", "520", "-h", "160"],
-    "30day": ["-s", "-30d", "-w", "520", "-h", "160"],
-    "1year": ["-s", "-1y", "-w", "520", "-h", "160"]
+    "1day": ["-s", "-1d", "-w", "430", "-h", "120"],
+    "7day": ["-s", "-7d", "-w", "430", "-h", "120"],
+    "30day": ["-s", "-30d", "-w", "430", "-h", "120"],
+    "1year": ["-s", "-1y", "-w", "430", "-h", "120"]
   };
 
   const timeParams = graphParams[timespan] || graphParams["1day"];
@@ -381,20 +438,13 @@ function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
     graphPath,
     ...timeParams,
     "--title", title,
-    "--vertical-label", "Mbps",
-    "--right-axis-label", "Errors/sec",
+    "--vertical-label", "Bits per second",
     `DEF:inOctets=${rrdPath}:InOctets:AVERAGE`,
     `DEF:outOctets=${rrdPath}:OutOctets:AVERAGE`,
-    `DEF:inErrors=${rrdPath}:InErrors:AVERAGE`,
-    `DEF:outErrors=${rrdPath}:OutErrors:AVERAGE`,
     `CDEF:inBits=inOctets,8,*`,
     `CDEF:outBits=outOctets,8,*`,
-    `CDEF:inMbps=inBits,1000000,/`,
-    `CDEF:outMbps=outBits,1000000,/`,
-    `AREA:inMbps#00CC00:"In Traffic (Mbps)"`,
-    `LINE2:outMbps#0000FF:"Out Traffic (Mbps)"`,
-    `LINE2:inErrors#FF0000:"In Errors"`,
-    `LINE2:outErrors#FFAA00:"Out Errors"`
+    `AREA:inBits#00CC00:"In"`,
+    `LINE1:outBits#0000FF:"Out"`
   ]);
 
   let stderr = "";
@@ -651,47 +701,40 @@ app.get("/api/iface/:iface/stats", (req, res) => {
       });
     }
 
-    // Get current octets
-    const oids = {
-      inOctets: `1.3.6.1.2.1.2.2.1.10.${ifIndex}`,
-      outOctets: `1.3.6.1.2.1.2.2.1.16.${ifIndex}`
+    const files = fs.readdirSync(RRD_DIR);
+    const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
+    if (!rrdFile) {
+      responseSent = true;
+      return res.json({
+        daily: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
+        weekly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
+        monthly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
+        yearly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } }
+      });
+    }
+
+    const rrdPath = path.join(RRD_DIR, rrdFile);
+    const spans = {
+      daily: "-1d",
+      weekly: "-7d",
+      monthly: "-30d",
+      yearly: "-1y"
     };
 
-    const results = {};
-    let completed = 0;
+    const out = {};
+    const keys = Object.keys(spans);
+    let done = 0;
 
-    Object.entries(oids).forEach(([key, oid]) => {
-      snmpGet(oid, (err, stdout) => {
+    keys.forEach((k) => {
+      fetchRrdStats(rrdPath, spans[k], (fetchErr, stats) => {
         if (responseSent) return;
-        
-        if (!err && stdout) {
-          const match = stdout.match(/=\s*(?:INTEGER|Counter32):\s*(\d+)/);
-          if (match) {
-            results[key] = parseInt(match[1]);
-          }
-        }
-        completed++;
-        if (completed === Object.keys(oids).length) {
+        out[k] = fetchErr
+          ? { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } }
+          : stats;
+        done++;
+        if (done === keys.length) {
           responseSent = true;
-          const dummyStats = {
-            daily: {
-              in: { max: `${results.inOctets || 0}`, avg: `${(results.inOctets || 0) / 2}`, current: `${results.inOctets || 0}` },
-              out: { max: `${results.outOctets || 0}`, avg: `${(results.outOctets || 0) / 2}`, current: `${results.outOctets || 0}` }
-            },
-            weekly: {
-              in: { max: `${(results.inOctets || 0) * 1.5}`, avg: `${(results.inOctets || 0) * 0.8}`, current: `${results.inOctets || 0}` },
-              out: { max: `${(results.outOctets || 0) * 1.5}`, avg: `${(results.outOctets || 0) * 0.8}`, current: `${results.outOctets || 0}` }
-            },
-            monthly: {
-              in: { max: `${(results.inOctets || 0) * 2}`, avg: `${(results.inOctets || 0) * 0.7}`, current: `${results.inOctets || 0}` },
-              out: { max: `${(results.outOctets || 0) * 2}`, avg: `${(results.outOctets || 0) * 0.7}`, current: `${results.outOctets || 0}` }
-            },
-            yearly: {
-              in: { max: `${(results.inOctets || 0) * 3}`, avg: `${(results.inOctets || 0) * 0.5}`, current: `${results.inOctets || 0}` },
-              out: { max: `${(results.outOctets || 0) * 3}`, avg: `${(results.outOctets || 0) * 0.5}`, current: `${results.outOctets || 0}` }
-            }
-          };
-          res.json(dummyStats);
+          res.json(out);
         }
       });
     });
