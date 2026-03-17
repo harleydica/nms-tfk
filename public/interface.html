@@ -74,6 +74,16 @@
     .footer {
       margin-top: 40px;
     }
+
+    .info-box {
+      background: #f0f0f0;
+      border: 1px solid #999;
+      border-radius: 4px;
+      padding: 12px;
+      margin: 15px 0;
+      font-size: 14px;
+      line-height: 1.5;
+    }
   </style>
 </head>
 
@@ -96,6 +106,10 @@
 </div>
 
 <div class="separator"></div>
+
+<div class="info-box" id="infobox">
+  <strong id="info-text">Loading system information...</strong>
+</div>
 
 <div id="content"></div>
 
@@ -151,6 +165,45 @@ fetch("/api/interfaces/detailed")
     }
   })
   .catch(() => {});
+
+// Fetch system uptime and last update
+Promise.all([
+  fetch("/api/system/info").then((res) => res.json()).catch(() => ({})),
+  fetch(`/api/rrd/lastupdate/${encodeURIComponent(iface)}`).then((res) => res.json()).catch(() => ({}))
+]).then(([sysInfo, rrdInfo]) => {
+  // Format uptime
+  function formatUptime(centiseconds) {
+    const totalSeconds = Math.floor(centiseconds / 100);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${days} days, ${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  // Format last update
+  function formatDateTime(timestamp) {
+    if (!timestamp) return "N/A";
+    const date = new Date(timestamp);
+    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    
+    const day = dayNames[date.getDay()];
+    const month = monthNames[date.getMonth()];
+    const dateNum = date.getDate();
+    const year = date.getFullYear();
+    const time = String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
+    
+    return `${day}, ${dateNum} ${month} ${year} at ${time}`;
+  }
+
+  const sysName = sysInfo.sysName || "router";
+  const uptime = sysInfo.sysUpTime ? formatUptime(sysInfo.sysUpTime) : "N/A";
+  const lastUpdate = formatDateTime(rrdInfo.timestamp);
+
+  const infoText = `The statistics were last updated ${lastUpdate}, at which time '<strong>${sysName}</strong>' had been up for <strong>${uptime}</strong>.`;
+  document.getElementById("info-text").innerHTML = infoText;
+}).catch(() => {});
 
 const sections = [
   ["daily",   "Daily Graph (5 Minute Average)"],

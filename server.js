@@ -666,6 +666,100 @@ app.get("/api/ip", (req, res) => {
 });
 
 /**
+ * GET /api/system/info
+ * Ambil informasi sistem (sysUpTime, sysName, sysDescr)
+ */
+app.get("/api/system/info", (req, res) => {
+  const oids = {
+    sysDescr: "1.3.6.1.2.1.1.1.0",
+    sysObjectID: "1.3.6.1.2.1.1.2.0",
+    sysUpTime: "1.3.6.1.2.1.1.3.0",
+    sysContact: "1.3.6.1.2.1.1.4.0",
+    sysName: "1.3.6.1.2.1.1.5.0",
+    sysLocation: "1.3.6.1.2.1.1.6.0"
+  };
+
+  const results = {};
+  let completed = 0;
+
+  Object.entries(oids).forEach(([key, oid]) => {
+    snmpGet(oid, (err, stdout) => {
+      if (!err && stdout) {
+        const match = stdout.match(/=\s*(?:STRING|INTEGER|Timeticks):\s*(?:\((\d+)\)|"([^"]+)"|(\d+))/i);
+        if (match) {
+          results[key] = match[1] || match[2] || match[3] || "";
+        }
+      }
+      completed++;
+      if (completed === Object.keys(oids).length) {
+        res.json(results);
+      }
+    });
+  });
+});
+
+/**
+ * GET /api/rrd/lastupdate/:iface
+ * Ambil waktu update terakhir dari RRD file
+ */
+app.get("/api/rrd/lastupdate/:iface", (req, res) => {
+  const { iface } = req.params;
+
+  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
+    if (err || !stdout) {
+      return res.json({ timestamp: null });
+    }
+
+    let ifIndex = null;
+    const lines = stdout.split("\n").filter((l) => l.trim());
+    lines.forEach((line) => {
+      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]*)/);
+      if (match && match[2] === iface) {
+        ifIndex = match[1];
+      }
+    });
+
+    if (!ifIndex) {
+      return res.json({ timestamp: null });
+    }
+
+    const files = fs.readdirSync(RRD_DIR);
+    const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
+
+    if (!rrdFile) {
+      return res.json({ timestamp: null });
+    }
+
+    const rrdPath = path.join(RRD_DIR, rrdFile);
+    const cmd = spawn("rrdtool", ["lastupdate", rrdPath]);
+
+    let stdout2 = "";
+    cmd.stdout.on("data", (data) => {
+      stdout2 += data.toString();
+    });
+
+    cmd.on("close", (code) => {
+      if (code === 0) {
+        // Parse lastupdate output: "1234567890: 123456 789012 ..."
+        const match = stdout2.match(/(\d+):/);
+        if (match) {
+          const timestamp = parseInt(match[1], 10) * 1000; // convert to milliseconds
+          res.json({ timestamp });
+        } else {
+          res.json({ timestamp: null });
+        }
+      } else {
+        res.json({ timestamp: null });
+      }
+    });
+
+    cmd.on("error", () => {
+      res.json({ timestamp: null });
+    });
+  });
+});
+
+/**
  * GET /api/interfaces
  * Ambil semua interface dari router via SNMP
  */
