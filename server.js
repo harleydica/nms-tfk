@@ -526,30 +526,3 @@ app.listen(PORT, () => {
 });
 
 export default app;
- */
-app.get("/api/iface/:iface/graph/:type", async (req, res) => {
-  try {
-    const { iface, type } = req.params;
-    if (!["daily", "weekly", "monthly", "yearly"].includes(type)) {
-      return res.status(400).send("Invalid type");
-    }
-
-    const r = await mtFetch(`/graphs/iface/${encodeURIComponent(iface)}/${type}.gif`);
-
-    // forward content-type, cache-control
-    res.setHeader("Content-Type", r.headers.get("content-type") || "image/gif");
-    res.setHeader("Cache-Control", "no-store");
-
-    // stream
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.send(buf);
-  } catch (e) {
-    res.status(500).send(String(e.message || e));
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`NMS running: http://localhost:${PORT}`);
-  console.log(`Using MikroTik: ${MIKROTIK_HOST}`);
-});
