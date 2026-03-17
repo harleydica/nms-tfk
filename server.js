@@ -321,55 +321,38 @@ app.get("/api/interfaces", (req, res) => {
  * Ambil detail interface (dengan speed, type, dll)
  */
 app.get("/api/interfaces/detailed", (req, res) => {
-  const details = [];
   let responseSent = false;
 
-  snmpWalk("1.3.6.1.2.1.2.2.1.5", (err, stdout) => {
+  // Cari interface names dengan OID 1.3.6.1.2.1.2.2.1.2 (ifDescr)
+  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
     if (responseSent) return;
-    
-    if (err) {
-      responseSent = true;
-      return res.status(500).json({ error: err.message });
-    }
 
-    const lines = stdout.split("\n").filter((l) => l.trim());
-
-    if (lines.length === 0) {
+    if (err || !stdout) {
       responseSent = true;
       return res.json([]);
     }
 
+    const details = [];
+    const lines = stdout.split("\n").filter((l) => l.trim());
+
+    // Parse snmpwalk format: iso.3.6.1.2.1.2.2.1.2.1 = STRING: "fxp0"
     lines.forEach((line) => {
-      const match = line.match(/(\d+)\s*=\s*INTEGER\s*(\d+)/);
+      // Try parsing: OID.ifIndex = STRING: "ifName"
+      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]+)"/);
       if (match) {
         const ifIndex = match[1];
-        details.push({ ifIndex });
+        const ifName = match[2];
+        details.push({ ifIndex, ifName });
       }
     });
 
-    // Get names
-    snmpWalk("1.3.6.1.2.1.2.2.1.2", (err2, stdout2) => {
-      if (responseSent) return;
-      
-      if (err2) {
-        responseSent = true;
-        return res.status(500).json({ error: err2.message });
-      }
-
-      const nameLines = stdout2.split("\n").filter((l) => l.trim());
-      nameLines.forEach((line) => {
-        const match = line.match(/\.(\d+)\s*=\s*STRING\s*"([^"]+)"/);
-        if (match) {
-          const ifIndex = match[1];
-          const ifName = match[2];
-          const iface = details.find((d) => d.ifIndex === ifIndex);
-          if (iface) iface.ifName = ifName;
-        }
-      });
-
+    if (details.length === 0) {
       responseSent = true;
-      res.json(details);
-    });
+      return res.json([]);
+    }
+
+    responseSent = true;
+    res.json(details);
   });
 });
 
@@ -545,7 +528,7 @@ app.get("/api/iface/:iface/stats", (req, res) => {
     let ifIndex = null;
     const lines = stdout.split("\n").filter((l) => l.trim());
     lines.forEach((line) => {
-      const match = line.match(/\.(\d+)\s*=\s*STRING\s*"([^"]*)/);
+      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]*)/);
       if (match && match[2] === iface) {
         ifIndex = match[1];
       }
@@ -575,7 +558,7 @@ app.get("/api/iface/:iface/stats", (req, res) => {
         if (responseSent) return;
         
         if (!err && stdout) {
-          const match = stdout.match(/=\s*(?:INTEGER|Counter32)\s*(\d+)/);
+          const match = stdout.match(/=\s*(?:INTEGER|Counter32):\s*(\d+)/);
           if (match) {
             results[key] = parseInt(match[1]);
           }
