@@ -148,6 +148,77 @@ function toDisplaySuffix(value) {
     .replace(/^-|-$/g, "") || "na";
 }
 
+const IF_TYPE_MAP = {
+  1: "other",
+  2: "regular1822",
+  3: "hdh1822",
+  4: "ddnx25",
+  5: "rfc877x25",
+  6: "ethernetCsmacd",
+  7: "iso88023csmacd",
+  8: "iso88024tokenBus",
+  9: "iso88025tokenRing",
+  10: "iso88026man",
+  11: "starLan",
+  12: "proteon10Mbit",
+  13: "proteon80Mbit",
+  14: "hyperchannel",
+  15: "fddi",
+  16: "lapb",
+  17: "sdlc",
+  18: "ds1",
+  19: "e1",
+  20: "basicISDN",
+  21: "primaryISDN",
+  22: "propPointToPointSerial",
+  23: "ppp",
+  24: "softwareLoopback",
+  25: "eon",
+  26: "ethernet3Mbit",
+  27: "nsip",
+  28: "slip",
+  29: "ultra",
+  30: "ds3",
+  31: "sip",
+  32: "frameRelay",
+  33: "rs232",
+  34: "para",
+  35: "arcnet",
+  36: "arcnetPlus",
+  37: "atm",
+  38: "miox25",
+  39: "sonet",
+  40: "x25ple",
+  41: "iso88022llc",
+  42: "localTalk",
+  43: "smdsDxi",
+  44: "frameRelayService",
+  45: "v35",
+  46: "hssi",
+  47: "hippi",
+  48: "qllc",
+  49: "fastEthernet",
+  50: "fddi",
+  51: "lapd",
+  52: "v37",
+  53: "x121",
+  54: "interleave",
+  55: "remote",
+  56: "ns",
+  57: "taxiphone",
+  58: "videotelephony",
+  59: "pingGroup",
+  60: "gramphone",
+  61: "aal2",
+  62: "twistedPairFastEthernet"
+};
+
+function getIfTypeDescription(ifTypeNum) {
+  const num = parseInt(ifTypeNum, 10);
+  const name = IF_TYPE_MAP[num] || "unknown";
+  return `${name} (${num})`;
+}
+
 function getInterfacesFromSnmp(callback) {
   snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
     if (err || !stdout) {
@@ -170,54 +241,70 @@ function getInterfacesFromSnmp(callback) {
       byIndex[itf.ifIndex] = {
         ifIndex: itf.ifIndex,
         ifName: itf.ifName,
+        ifType: "-",
         interfaceDescription: itf.ifName,
         displayName: itf.ifName,
         speedrate: "-"
       };
     });
 
-    // Optional ifAlias (interface-description)
-    snmpWalk("1.3.6.1.2.1.31.1.1.1.18", (aliasErr, aliasOut) => {
-      if (!aliasErr && aliasOut) {
-        aliasOut
+    // Fetch ifType
+    snmpWalk("1.3.6.1.2.1.2.2.1.3", (typeErr, typeOut) => {
+      if (!typeErr && typeOut) {
+        typeOut
           .split("\n")
           .filter((l) => l.trim())
           .forEach((line) => {
-            const m = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]*)"/);
-            if (m && byIndex[m[1]] && m[2].trim()) {
-              byIndex[m[1]].interfaceDescription = m[2].trim();
+            const m = line.match(/\.(\d+)\s*=\s*\w+:?\s*(\d+)/);
+            if (m && byIndex[m[1]]) {
+              byIndex[m[1]].ifType = getIfTypeDescription(m[2]);
             }
           });
       }
 
-      // ifSpeed
-      snmpWalk("1.3.6.1.2.1.2.2.1.5", (speedErr, speedOut) => {
-        if (!speedErr && speedOut) {
-          speedOut
+      // Optional ifAlias (interface-description)
+      snmpWalk("1.3.6.1.2.1.31.1.1.1.18", (aliasErr, aliasOut) => {
+        if (!aliasErr && aliasOut) {
+          aliasOut
             .split("\n")
             .filter((l) => l.trim())
             .forEach((line) => {
-              const m = line.match(/\.(\d+)\s*=\s*\w+:?\s*(\d+)/);
-              if (m && byIndex[m[1]]) {
-                const bps = Number(m[2]);
-                if (Number.isFinite(bps) && bps > 0) {
-                  byIndex[m[1]].speedrate = bps >= 1e9 ? `${(bps / 1e9).toFixed(1)} Gbps` : `${(bps / 1e6).toFixed(1)} Mbps`;
-                }
+              const m = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]*)"/);
+              if (m && byIndex[m[1]] && m[2].trim()) {
+                byIndex[m[1]].interfaceDescription = m[2].trim();
               }
             });
         }
 
-        const finalInterfaces = Object.values(byIndex).map((itf) => {
-          const override = INTERFACE_DESCRIPTION_OVERRIDES[itf.ifName];
-          const finalDescription = override || itf.interfaceDescription || itf.ifName;
-          return {
-            ...itf,
-            interfaceDescription: finalDescription,
-            displayName: `${itf.ifName}-${toDisplaySuffix(finalDescription)}`
-          };
-        });
+        // ifSpeed
+        snmpWalk("1.3.6.1.2.1.2.2.1.5", (speedErr, speedOut) => {
+          if (!speedErr && speedOut) {
+            speedOut
+              .split("\n")
+              .filter((l) => l.trim())
+              .forEach((line) => {
+                const m = line.match(/\.(\d+)\s*=\s*\w+:?\s*(\d+)/);
+                if (m && byIndex[m[1]]) {
+                  const bps = Number(m[2]);
+                  if (Number.isFinite(bps) && bps > 0) {
+                    byIndex[m[1]].speedrate = bps >= 1e9 ? `${(bps / 1e9).toFixed(1)} Gbps` : `${(bps / 1e6).toFixed(1)} Mbps`;
+                  }
+                }
+              });
+          }
 
-        callback(null, finalInterfaces);
+          const finalInterfaces = Object.values(byIndex).map((itf) => {
+            const override = INTERFACE_DESCRIPTION_OVERRIDES[itf.ifName];
+            const finalDescription = override || itf.interfaceDescription || itf.ifName;
+            return {
+              ...itf,
+              interfaceDescription: finalDescription,
+              displayName: `${itf.ifName}-${toDisplaySuffix(finalDescription)}`
+            };
+          });
+
+          callback(null, finalInterfaces);
+        });
       });
     });
   });

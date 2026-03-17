@@ -85,11 +85,13 @@
 
 <div class="meta">
   <table>
-    <tr><td>System:</td><td><strong>NMS in TFK HOME-YGK</strong></td></tr>
-    <tr><td>Maintainer:</td><td><strong>mail@taufikcrisnawan.dev</strong></td></tr>
-    <tr><td>description:</td><td><strong id="desc"></strong></td></tr>
-    <tr><td>speedrate:</td><td id="speedrate">—</td></tr>
-    <tr><td>IP:</td><td id="ip">-</td></tr>
+    <tr><td>System:</td><td><strong>IIX in APJII</strong></td></tr>
+    <tr><td>Maintainer:</td><td><strong></strong></td></tr>
+    <tr><td>Description:</td><td><strong id="desc"></strong></td></tr>
+    <tr><td>ifType:</td><td id="iftype">-</td></tr>
+    <tr><td>ifName:</td><td id="ifname">-</td></tr>
+    <tr><td>Max Speed:</td><td id="speedrate">—</td></tr>
+    <tr><td>Ip:</td><td id="ip">-</td></tr>
   </table>
 </div>
 
@@ -108,8 +110,9 @@ import { INTERFACES } from './config.js';
 
 const iface = new URLSearchParams(location.search).get("iface") || "unknown";
 
-document.title = `TFK - ${iface}`;
-document.getElementById("title").textContent = iface;
+document.title = `TFK - ${iface.toUpperCase()}`;
+document.getElementById("title").textContent = iface.toUpperCase();
+document.getElementById("ifname").textContent = iface;
 document.getElementById("desc").textContent = iface;
 
 // Load interface data from config
@@ -129,12 +132,14 @@ fetch("/api/interfaces/detailed")
       : null;
     if (!current) return;
 
-    const displayName = current.displayName || `${current.ifName}-${current.interfaceDescription || current.ifName}`;
-
+    // Display only description (not displayName)
     if (current.interfaceDescription) {
       document.getElementById("desc").textContent = current.interfaceDescription;
-      document.getElementById("title").textContent = displayName;
-      document.title = `TFK - ${displayName}`;
+    }
+
+    // Display ifType
+    if (current.ifType) {
+      document.getElementById("iftype").textContent = current.ifType;
     }
 
     if (current.speedrate) {
