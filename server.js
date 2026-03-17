@@ -525,11 +525,7 @@ app.listen(PORT, () => {
   initDatabase();
 });
 
-export default app; 
-             req.socket.remoteAddress || 
-             req.ip;
-  res.json({ ip: ip.replace('::ffff:', '') });
-});
+export default app;
 
 /**
  * API: proxy gambar graph (gif)
