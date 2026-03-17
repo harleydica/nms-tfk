@@ -136,7 +136,50 @@ function getInterfacesFromSnmp(callback) {
       if (parsed) interfaces.push(parsed);
     });
 
-    callback(null, interfaces);
+    const byIndex = {};
+    interfaces.forEach((itf) => {
+      byIndex[itf.ifIndex] = {
+        ifIndex: itf.ifIndex,
+        ifName: itf.ifName,
+        interfaceDescription: itf.ifName,
+        speedrate: "-"
+      };
+    });
+
+    // Optional ifAlias (interface-description)
+    snmpWalk("1.3.6.1.2.1.31.1.1.1.18", (aliasErr, aliasOut) => {
+      if (!aliasErr && aliasOut) {
+        aliasOut
+          .split("\n")
+          .filter((l) => l.trim())
+          .forEach((line) => {
+            const m = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]*)"/);
+            if (m && byIndex[m[1]] && m[2].trim()) {
+              byIndex[m[1]].interfaceDescription = m[2].trim();
+            }
+          });
+      }
+
+      // ifSpeed
+      snmpWalk("1.3.6.1.2.1.2.2.1.5", (speedErr, speedOut) => {
+        if (!speedErr && speedOut) {
+          speedOut
+            .split("\n")
+            .filter((l) => l.trim())
+            .forEach((line) => {
+              const m = line.match(/\.(\d+)\s*=\s*\w+:?\s*(\d+)/);
+              if (m && byIndex[m[1]]) {
+                const bps = Number(m[2]);
+                if (Number.isFinite(bps) && bps > 0) {
+                  byIndex[m[1]].speedrate = bps >= 1e9 ? `${(bps / 1e9).toFixed(1)} Gbps` : `${(bps / 1e6).toFixed(1)} Mbps`;
+                }
+              }
+            });
+        }
+
+        callback(null, Object.values(byIndex));
+      });
+    });
   });
 }
 

@@ -87,10 +87,8 @@
   <table>
     <tr><td>System:</td><td><strong>NMS in TFK HOME-YGK</strong></td></tr>
     <tr><td>Maintainer:</td><td><strong>mail@taufikcrisnawan.dev</strong></td></tr>
-    <tr><td>Description:</td><td><strong id="desc"></strong></td></tr>
-    <tr><td>ifType:</td><td id="iftype">—</td></tr>
-    <tr><td>ifName:</td><td id="ifname"></td></tr>
-    <tr><td>Max Speed:</td><td id="maxspeed">—</td></tr>
+    <tr><td>Interface-description:</td><td><strong id="desc"></strong></td></tr>
+    <tr><td>Speedrate:</td><td id="speedrate">—</td></tr>
     <tr><td>IP:</td><td id="ip">-</td></tr>
   </table>
 </div>
@@ -113,16 +111,35 @@ const iface = new URLSearchParams(location.search).get("iface") || "unknown";
 document.title = `TFK - ${iface}`;
 document.getElementById("title").textContent = iface;
 document.getElementById("desc").textContent = iface;
-document.getElementById("ifname").textContent = iface;
 
 // Load interface data from config
 const ifaceData = INTERFACES[iface];
 if (ifaceData) {
   document.getElementById("ip").textContent = ifaceData.ip || "-";
   document.getElementById("desc").textContent = ifaceData.description || iface;
-  document.getElementById("iftype").textContent = ifaceData.ifType;
-  document.getElementById("maxspeed").textContent = ifaceData.maxSpeed;
+  document.getElementById("speedrate").textContent = ifaceData.maxSpeed || "-";
 }
+
+// Enrich with SNMP-discovered metadata when available
+fetch("/api/interfaces/detailed")
+  .then((res) => res.json())
+  .then((interfaces) => {
+    const current = Array.isArray(interfaces)
+      ? interfaces.find((x) => x.ifName === iface)
+      : null;
+    if (!current) return;
+
+    if (current.interfaceDescription) {
+      document.getElementById("desc").textContent = current.interfaceDescription;
+      document.getElementById("title").textContent = current.interfaceDescription;
+      document.title = `TFK - ${current.interfaceDescription}`;
+    }
+
+    if (current.speedrate) {
+      document.getElementById("speedrate").textContent = current.speedrate;
+    }
+  })
+  .catch(() => {});
 
 const sections = [
   ["daily",   "Daily Graph (5 Minute Average)"],
