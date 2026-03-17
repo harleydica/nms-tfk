@@ -85,7 +85,7 @@
 
 <div class="meta">
   <table>
-    <tr><td>System:</td><td><strong>IIX in APJII</strong></td></tr>
+    <tr><td>System:</td><td><strong id="system">-</strong></td></tr>
     <tr><td>Maintainer:</td><td><strong></strong></td></tr>
     <tr><td>Description:</td><td><strong id="desc"></strong></td></tr>
     <tr><td>ifType:</td><td id="iftype">-</td></tr>
@@ -110,10 +110,11 @@ import { INTERFACES } from './config.js';
 
 const iface = new URLSearchParams(location.search).get("iface") || "unknown";
 
-document.title = `TFK - ${iface.toUpperCase()}`;
-document.getElementById("title").textContent = iface.toUpperCase();
+document.title = `TFK - ${iface}`;
+document.getElementById("title").textContent = iface; // Will be updated with description after API fetch
 document.getElementById("ifname").textContent = iface;
 document.getElementById("desc").textContent = iface;
+document.getElementById("system").textContent = "Network Management System";
 
 // Load interface data from config
 const ifaceData = INTERFACES[iface];
@@ -132,8 +133,11 @@ fetch("/api/interfaces/detailed")
       : null;
     if (!current) return;
 
-    // Display only description (not displayName)
+    // Display description as title (in uppercase)
     if (current.interfaceDescription) {
+      const descTitle = current.interfaceDescription.toUpperCase();
+      document.getElementById("title").textContent = descTitle;
+      document.title = `TFK - ${descTitle}`;
       document.getElementById("desc").textContent = current.interfaceDescription;
     }
 
