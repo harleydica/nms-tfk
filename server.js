@@ -996,16 +996,20 @@ app.get("/api/interfaces", (req, res) => {
 
 /**
  * GET /api/interfaces/detailed
- * Ambil detail interface (dari cache, update saat discovery)
+ * Ambil detail interface dari cache, fallback ke database (tidak pernah SNMP)
  */
 app.get("/api/interfaces/detailed", (req, res) => {
-  // Return cached data immediately
+  // Return memori cache jika tersedia (fastest)
   if (cachedInterfaces.length > 0) {
     return res.json(cachedInterfaces);
   }
 
-  // If cache empty, trigger discovery and return empty for now
-  getInterfacesFromSnmp((err, interfaces) => {
+  // Fallback: load dari database jika cache belum ready (e.g., startup)
+  loadInterfacesFromDB((err, interfaces) => {
+    if (err) {
+      console.error("Failed to load interfaces from DB:", err.message);
+      return res.json([]);
+    }
     res.json(interfaces || []);
   });
 });
