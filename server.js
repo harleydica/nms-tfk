@@ -151,179 +151,6 @@ function toDisplaySuffix(value) {
     .replace(/^-|-$/g, "") || "na";
 }
 
-/**
- * Simpan interfaces ke database dan deteksi perubahan
- * Return: { changed: boolean, interfaces: array }
- */
-async function pushInterfacesToDB(newInterfaces) {
-  try {
-    const conn = await getDBConnection();
-    
-    // Baca interfaces saat ini dari DB
-    const [dbRows] = await conn.execute(
-      `SELECT ifIndex, ifName, ifDescription, ifSpeed FROM interfaces WHERE enabled = 1`
-    );
-    
-    // Buat hash dari DB untuk perbandingan cepat
-    const dbMap = new Map();
-    dbRows.forEach(row => {
-      dbMap.set(String(row.ifIndex), {
-        name: row.ifName,
-        desc: row.ifDescription,
-        speed: row.ifSpeed
-      });
-    });
-    
-    let hasChanges = false;
-    
-    // Upsert setiap interface dari SNMP
-    for (const iface of newInterfaces) {
-      const existing = dbMap.get(String(iface.ifIndex));
-      
-      // Check if any field changed
-      const changed = !existing || 
-        existing.name !== iface.ifName || 
-        existing.desc !== iface.interfaceDescription || 
-        existing.speed !== iface.speedrate;
-      
-      if (changed) {
-        hasChanges = true;
-      }
-      
-      // Always update DB with latest SNMP data
-      await conn.execute(
-        `INSERT INTO interfaces (ifIndex, ifName, ifType, ifSpeed, ifDescription)
-         VALUES (?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-         ifName = VALUES(ifName),
-         ifType = VALUES(ifType),
-         ifSpeed = VALUES(ifSpeed),
-         ifDescription = VALUES(ifDescription),
-         updated_at = CURRENT_TIMESTAMP`,
-        [
-          iface.ifIndex,
-          iface.ifName,
-          iface.ifType,
-          parseInt(iface.speedrate) || 0,
-          iface.interfaceDescription
-        ]
-      );
-    }
-    
-    // Mark interfaces not in current list as disabled
-    const currentIndexes = newInterfaces.map(i => i.ifIndex);
-    if (currentIndexes.length > 0) {
-      const placeholders = currentIndexes.map(() => "?").join(",");
-      const [oldRows] = await conn.execute(
-        `SELECT ifIndex FROM interfaces WHERE enabled = 1 AND ifIndex NOT IN (${placeholders})`,
-        currentIndexes
-      );
-      
-      if (oldRows.length > 0) {
-        hasChanges = true;
-        const oldIndexes = oldRows.map(r => r.ifIndex);
-        const oldPlaceholders = oldIndexes.map(() => "?").join(",");
-        await conn.execute(
-          `UPDATE interfaces SET enabled = 0 WHERE ifIndex IN (${oldPlaceholders})`,
-          oldIndexes
-        );
-      }
-    }
-    
-    await conn.end();
-    
-    if (hasChanges) {
-      lastInterfaceChangeTime = Date.now();
-      console.log(`✓ Interface DB updated (${newInterfaces.length} active, changes detected)`);
-    }
-    
-    return { changed: hasChanges, interfaces: newInterfaces };
-  } catch (err) {
-    console.error("pushInterfacesToDB error:", err.message);
-    return { changed: false, interfaces: [] };
-  }
-}
-
-/**
- * Muat interfaces dari database (faster, no SNMP)
- */
-async function loadInterfacesFromDB(callback) {
-  try {
-    const conn = await getDBConnection();
-    const [rows] = await conn.execute(
-      `SELECT ifIndex, ifName, ifType, ifSpeed, ifDescription
-       FROM interfaces
-       WHERE enabled = 1
-       ORDER BY ifName`
-    );
-    
-    const interfaces = rows.map(row => ({
-      ifIndex: String(row.ifIndex),
-      ifName: row.ifName,
-      ifType: row.ifType,
-      interfaceDescription: row.ifDescription,
-      speedrate: row.ifSpeed ? (row.ifSpeed >= 1e9 ? `${(row.ifSpeed / 1e9).toFixed(1)} Gbps` : `${(row.ifSpeed / 1e6).toFixed(1)} Mbps`) : "-",
-      displayName: `${row.ifName}-${toDisplaySuffix(row.ifDescription)}`
-    }));
-    
-    await conn.end();
-    callback(null, interfaces);
-  } catch (err) {
-    console.error("loadInterfacesFromDB error:", err.message);
-    callback(err, []);
-  }
-}
-
-/**
- * Regenerate graphs hanya untuk interfaces yang berubah (atau semua jika forced)
- */
-function regenerateGraphsForInterfaces(interfaces, forced = false, callback) {
-  if (!interfaces || interfaces.length === 0) {
-    if (callback) callback();
-    return;
-  }
-  
-  const timespans = ["1day", "7day", "30day", "1year"];
-  let completed = 0;
-  const total = interfaces.length * timespans.length;
-  
-  if (total === 0) {
-    if (callback) callback();
-    return;
-  }
-  
-  const action = forced ? "forced" : "smart";
-  console.log(`🔄 [${action}] Regenerating ${total} graphs for ${interfaces.length} interface(s)...`);
-  
-  interfaces.forEach((iface) => {
-    const rrdPath = path.join(RRD_DIR, `${iface.ifIndex}_${toSafeFilename(iface.ifName)}.rrd`);
-    
-    // Check if RRD exists before generating
-    if (!fs.existsSync(rrdPath)) {
-      console.warn(`⚠️ RRD not found: ${rrdPath}, skipping...`);
-      completed += timespans.length;
-      if (completed === total && callback) {
-        console.log(`✓ Graph regeneration done (${completed}/${total})`);
-        callback();
-      }
-      return;
-    }
-    
-    timespans.forEach((timespan) => {
-      const graphPath = path.join(GRAPH_DIR, `${iface.ifIndex}_${timespan}.png`);
-      generateGraph(rrdPath, graphPath, `Traffic: ${iface.ifName}`, timespan, (err) => {
-        completed++;
-        if (err) {
-          console.error(`❌ Error generating ${iface.ifIndex}_${timespan}: ${err.message}`);
-        }
-        if (completed === total && callback) {
-          console.log(`✓ Graph regeneration done (${completed}/${total})`);
-          callback();
-        }
-      });
-    });
-  });
-}
 
 const IF_TYPE_MAP = {
   1: "other",
@@ -569,40 +396,39 @@ function runCollectorCycle() {
     });
   });
 
-  // ===== STEP 2: Check for interface changes =====
-  getInterfacesFromSnmp((err, newInterfaces) => {
-    if (err) {
-      console.error("Failed to fetch interfaces in collector:", err.message);
-      return;
-    }
-
-    // Push to DB and detect changes
-    pushInterfacesToDB(newInterfaces).then((result) => {
-      const { changed, interfaces } = result;
-      
-      // Update cache from current result
-      cachedInterfaces = interfaces;
-      
-      if (changed) {
-        console.log(`📍 Interface changes detected at ${new Date().toLocaleTimeString()}`);
-        // ===== STEP 3: Regenerate graphs only if changed =====
-        regenerateGraphsForInterfaces(interfaces, false, () => {
-          console.log("✓ Graphs updated after interface change");
-        });
-      } else {
-        console.log(`✓ No interface changes (reusing cache), RRD updated`);
+  // ===== STEP 2: Refresh interface cache every 30 minutes (not every 5 menit) =====
+  // Calculate intervals - only refresh cache every 30 min to avoid SNMP overhead
+  const now = Date.now();
+  const thirtyMinutes = 30 * 60 * 1000;
+  
+  if (now - lastInterfaceChangeTime > thirtyMinutes) {
+    console.log("🔄 Interval 30 minutes: refreshing interface cache from SNMP...");
+    getInterfacesFromSnmp((err, newInterfaces) => {
+      if (err) {
+        console.error("Failed to refresh interfaces:", err.message);
+        return;
       }
-    }).catch((err) => {
-      console.error("Database update error:", err.message);
+
+      // Update cache
+      cachedInterfaces = newInterfaces;
+      lastInterfaceChangeTime = now;
+      console.log(`✓ Interface cache refreshed (${newInterfaces.length} interfaces)`);
+
+      // Regenerate graphs for all interfaces
+      regenerateAllGraphs(() => {
+        console.log("✓ All graphs regenerated");
+      });
     });
-  });
+  } else {
+    console.log(`✓ RRD updated, interface cache valid (refresh in ${Math.round((thirtyMinutes - (now - lastInterfaceChangeTime)) / 60000)} minutes)`);
+  }
 }
 
 function startCollector() {
   if (collectorTimer) return;
   runCollectorCycle();
   collectorTimer = setInterval(runCollectorCycle, 300000);
-  console.log("Collector started (every 5 minutes, smart regeneration enabled)");
+  console.log("Collector started (every 5 minutes, refresh cache every 30 minutes)");
 }
 
 function bootstrapRrdFromSnmp() {
@@ -617,28 +443,26 @@ function bootstrapRrdFromSnmp() {
       return;
     }
 
-    // Push interfaces to DB
-    pushInterfacesToDB(interfaces).then((result) => {
-      const { interfaces: ifaces } = result;
-      
-      // Create RRD files for new interfaces
-      ifaces.forEach(({ ifIndex, ifName }) => {
-        const rrdPath = path.join(RRD_DIR, `${ifIndex}_${toSafeFilename(ifName)}.rrd`);
-        createRRD(rrdPath, () => {});
-      });
+    // Update cache immediately
+    cachedInterfaces = interfaces;
+    lastInterfaceChangeTime = Date.now();
 
-      console.log(`Bootstrap completed: ${ifaces.length} interfaces prepared`);
+    // Create RRD files for all interfaces
+    interfaces.forEach(({ ifIndex, ifName }) => {
+      const rrdPath = path.join(RRD_DIR, `${ifIndex}_${toSafeFilename(ifName)}.rrd`);
+      createRRD(rrdPath, () => {});
+    });
 
-      // Generate initial graph cache (force all)
-      console.log("Generating initial graph cache...");
-      regenerateGraphsForInterfaces(ifaces, true, () => {
-        console.log("✓ Initial graph cache ready. Starting collector...");
+    console.log(`✓ Bootstrap completed: ${interfaces.length} interfaces prepared`);
+    console.log(`✓ Generating initial graph cache...`);
+
+    // Generate all graphs (wait a bit for RRD creation)
+    setTimeout(() => {
+      regenerateAllGraphs(() => {
+        console.log("✓ Initial graph cache ready");
         startCollector();
       });
-    }).catch((err) => {
-      console.error("Bootstrap database error:", err.message);
-      startCollector(); // Fallback: start collector anyway
-    });
+    }, 2000);
   });
 }
 
