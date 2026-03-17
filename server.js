@@ -109,6 +109,104 @@ function toSafeFilename(value) {
   return String(value || "iface").replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+let collectorTimer = null;
+
+function parseIfDescrLine(line) {
+  const match = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]+)"/);
+  if (!match) return null;
+  return { ifIndex: match[1], ifName: match[2] };
+}
+
+function parseCounterValue(stdout) {
+  const match = String(stdout || "").match(/=\s*(?:INTEGER|Counter32|Counter64):?\s*(\d+)/i);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+function getInterfacesFromSnmp(callback) {
+  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
+    if (err || !stdout) {
+      callback(err || new Error("No SNMP output"), []);
+      return;
+    }
+
+    const interfaces = [];
+    const lines = stdout.split("\n").filter((l) => l.trim());
+    lines.forEach((line) => {
+      const parsed = parseIfDescrLine(line);
+      if (parsed) interfaces.push(parsed);
+    });
+
+    callback(null, interfaces);
+  });
+}
+
+function runCollectorCycle() {
+  const files = fs.readdirSync(RRD_DIR).filter((f) => f.endsWith(".rrd"));
+
+  files.forEach((file) => {
+    const rrdPath = path.join(RRD_DIR, file);
+    const match = file.match(/(\d+)_/);
+    if (!match) return;
+
+    const ifIndex = match[1];
+
+    snmpGet(`1.3.6.1.2.1.2.2.1.10.${ifIndex}`, (err1, stdout1) => {
+      if (err1) return;
+
+      snmpGet(`1.3.6.1.2.1.2.2.1.16.${ifIndex}`, (err2, stdout2) => {
+        if (err2) return;
+
+        snmpGet(`1.3.6.1.2.1.2.2.1.14.${ifIndex}`, (err3, stdout3) => {
+          if (err3) return;
+
+          snmpGet(`1.3.6.1.2.1.2.2.1.20.${ifIndex}`, (err4, stdout4) => {
+            if (err4) return;
+
+            const inOctets = parseCounterValue(stdout1);
+            const outOctets = parseCounterValue(stdout2);
+            const inErrors = parseCounterValue(stdout3);
+            const outErrors = parseCounterValue(stdout4);
+
+            updateRRD(rrdPath, inOctets, outOctets, inErrors, outErrors, (err) => {
+              if (err) {
+                console.error(`Error updating ${file}:`, err.message);
+              }
+            });
+          });
+        });
+      });
+    });
+  });
+}
+
+function startCollector() {
+  if (collectorTimer) return;
+  runCollectorCycle();
+  collectorTimer = setInterval(runCollectorCycle, 300000);
+  console.log("Collector started (every 5 minutes)");
+}
+
+function bootstrapRrdFromSnmp() {
+  getInterfacesFromSnmp((err, interfaces) => {
+    if (err) {
+      console.error("SNMP bootstrap failed:", err.message);
+      return;
+    }
+
+    if (!interfaces.length) {
+      console.log("No interfaces discovered from SNMP during bootstrap");
+      return;
+    }
+
+    interfaces.forEach(({ ifIndex, ifName }) => {
+      const rrdPath = path.join(RRD_DIR, `${ifIndex}_${toSafeFilename(ifName)}.rrd`);
+      createRRD(rrdPath, () => {});
+    });
+
+    console.log(`Bootstrap completed: ${interfaces.length} interfaces prepared`);
+  });
+}
+
 // ============================================
 // RRDtool HELPERS
 // ============================================
@@ -296,27 +394,12 @@ async function initDatabase() {
  * Ambil semua interface dari router via SNMP
  */
 app.get("/api/interfaces", (req, res) => {
-  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
+  getInterfacesFromSnmp((err, interfaces) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
 
-    const interfaces = {};
-    const lines = stdout.split("\n").filter((l) => l.trim());
-
-    lines.forEach((line) => {
-      // Parse: SNMPv2-SMI::ifAlias.1 = STRING "eth0"
-      const match = line.match(/SNMPv2-SMI::if\w+\.(\d+)\s*=\s*(?:STRING|INTEGER)\s+"?([^"]+)"?/);
-      if (match) {
-        const ifIndex = match[1];
-        const ifName = match[2];
-        if (!interfaces[ifIndex]) interfaces[ifIndex] = {};
-        interfaces[ifIndex].ifIndex = ifIndex;
-        interfaces[ifIndex].ifName = ifName;
-      }
-    });
-
-    res.json(Object.values(interfaces));
+    res.json(interfaces);
   });
 });
 
@@ -325,38 +408,11 @@ app.get("/api/interfaces", (req, res) => {
  * Ambil detail interface (dengan speed, type, dll)
  */
 app.get("/api/interfaces/detailed", (req, res) => {
-  let responseSent = false;
-
-  // Cari interface names dengan OID 1.3.6.1.2.1.2.2.1.2 (ifDescr)
-  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
-    if (responseSent) return;
-
-    if (err || !stdout) {
-      responseSent = true;
+  getInterfacesFromSnmp((err, interfaces) => {
+    if (err) {
       return res.json([]);
     }
-
-    const details = [];
-    const lines = stdout.split("\n").filter((l) => l.trim());
-
-    // Parse snmpwalk format: iso.3.6.1.2.1.2.2.1.2.1 = STRING: "fxp0"
-    lines.forEach((line) => {
-      // Try parsing: OID.ifIndex = STRING: "ifName"
-      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]+)"/);
-      if (match) {
-        const ifIndex = match[1];
-        const ifName = match[2];
-        details.push({ ifIndex, ifName });
-      }
-    });
-
-    if (details.length === 0) {
-      responseSent = true;
-      return res.json([]);
-    }
-
-    responseSent = true;
-    res.json(details);
+    res.json(interfaces);
   });
 });
 
@@ -381,10 +437,7 @@ app.get("/api/interfaces/:ifIndex/status", (req, res) => {
   Object.entries(oids).forEach(([key, oid]) => {
     snmpGet(oid, (err, stdout) => {
       if (!err && stdout) {
-        const match = stdout.match(/=\s*(?:INTEGER|Counter32)\s*(\d+)/);
-        if (match) {
-          results[key] = parseInt(match[1]);
-        }
+        results[key] = parseCounterValue(stdout);
       }
       completed++;
       if (completed === Object.keys(oids).length) {
@@ -435,50 +488,9 @@ app.post("/api/interfaces/:ifIndex/monitor", (req, res) => {
  * Jalankan data collection untuk semua interface yang di-monitor
  */
 app.get("/api/collectorstart", (req, res) => {
-  res.json({ message: "Collector started. Check logs for updates." });
-
-  // Jalankan collection setiap 5 menit
-  setInterval(() => {
-    const files = fs.readdirSync(RRD_DIR).filter((f) => f.endsWith(".rrd"));
-
-    files.forEach((file) => {
-      const rrdPath = path.join(RRD_DIR, file);
-      const match = file.match(/(\d+)_/);
-      if (!match) return;
-
-      const ifIndex = match[1];
-
-      // Ambil data current
-      snmpGet(`1.3.6.1.2.1.2.2.1.10.${ifIndex}`, (err1, stdout1) => {
-        if (err1) return;
-
-        snmpGet(`1.3.6.1.2.1.2.2.1.16.${ifIndex}`, (err2, stdout2) => {
-          if (err2) return;
-
-          snmpGet(`1.3.6.1.2.1.2.2.1.14.${ifIndex}`, (err3, stdout3) => {
-            if (err3) return;
-
-            snmpGet(`1.3.6.1.2.1.2.2.1.20.${ifIndex}`, (err4, stdout4) => {
-              if (err4) return;
-
-              const inOctets = parseInt(stdout1.match(/=\s*(\d+)/)?.[1] || 0);
-              const outOctets = parseInt(stdout2.match(/=\s*(\d+)/)?.[1] || 0);
-              const inErrors = parseInt(stdout3.match(/=\s*(\d+)/)?.[1] || 0);
-              const outErrors = parseInt(stdout4.match(/=\s*(\d+)/)?.[1] || 0);
-
-              updateRRD(rrdPath, inOctets, outOctets, inErrors, outErrors, (err) => {
-                if (err) {
-                  console.error(`Error updating ${file}:`, err.message);
-                } else {
-                  console.log(`Updated ${file}`);
-                }
-              });
-            });
-          });
-        });
-      });
-    });
-  }, 300000); // 5 minutes
+  startCollector();
+  runCollectorCycle();
+  res.json({ message: "Collector running (every 5 minutes)." });
 });
 
 /**
@@ -667,6 +679,8 @@ app.listen(PORT, () => {
 
   // Initialize database
   initDatabase();
+  bootstrapRrdFromSnmp();
+  startCollector();
 });
 
 export default app;
