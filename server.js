@@ -127,6 +127,7 @@ function toSafeFilename(value) {
 }
 
 let collectorTimer = null;
+let interfaceIndexMap = {}; // Cache: ifName -> ifIndex
 
 function parseIfDescrLine(line) {
   const match = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]+)"/);
@@ -230,7 +231,10 @@ function getInterfacesFromSnmp(callback) {
     const lines = stdout.split("\n").filter((l) => l.trim());
     lines.forEach((line) => {
       const parsed = parseIfDescrLine(line);
-      if (parsed) interfaces.push(parsed);
+      if (parsed) {
+        interfaces.push(parsed);
+        interfaceIndexMap[parsed.ifName] = parsed.ifIndex; // Update cache
+      }
     });
 
     const byIndex = {};
@@ -655,21 +659,11 @@ async function initDatabase() {
   }
 }
 
-// ============================================
-// API ENDPOINTS
-// ============================================
+// Cache system info (update setiap 30 menit)
+let cachedSystemInfo = {};
+let lastSystemInfoUpdate = 0;
 
-app.get("/api/ip", (req, res) => {
-  const forwarded = req.headers["x-forwarded-for"];
-  const ip = (Array.isArray(forwarded) ? forwarded[0] : String(forwarded || "").split(",")[0]) || req.socket.remoteAddress || req.ip || "Unknown";
-  res.json({ ip: String(ip).replace("::ffff:", "") });
-});
-
-/**
- * GET /api/system/info
- * Ambil informasi sistem (sysUpTime, sysName, sysDescr)
- */
-app.get("/api/system/info", (req, res) => {
+function updateSystemInfoCache() {
   const oids = {
     sysDescr: "1.3.6.1.2.1.1.1.0",
     sysObjectID: "1.3.6.1.2.1.1.2.0",
@@ -692,70 +686,83 @@ app.get("/api/system/info", (req, res) => {
       }
       completed++;
       if (completed === Object.keys(oids).length) {
-        res.json(results);
+        cachedSystemInfo = results;
+        lastSystemInfoUpdate = Date.now();
+        console.log("✓ System info cached");
       }
     });
   });
+}
+
+// Update cache on startup
+updateSystemInfoCache();
+
+// Update cache every 30 minutes
+setInterval(updateSystemInfoCache, 1800000);
+
+// ============================================
+// API ENDPOINTS
+// ============================================
+
+app.get("/api/ip", (req, res) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  const ip = (Array.isArray(forwarded) ? forwarded[0] : String(forwarded || "").split(",")[0]) || req.socket.remoteAddress || req.ip || "Unknown";
+  res.json({ ip: String(ip).replace("::ffff:", "") });
+});
+
+/**
+ * GET /api/system/info
+ * Return cached system info (updated every 30 min)
+ */
+app.get("/api/system/info", (req, res) => {
+  res.json(cachedSystemInfo);
 });
 
 /**
  * GET /api/rrd/lastupdate/:iface
- * Ambil waktu update terakhir dari RRD file
+ * Ambil waktu update terakhir dari RRD file (cepat, dari cache)
  */
 app.get("/api/rrd/lastupdate/:iface", (req, res) => {
   const { iface } = req.params;
+  
+  // Use cached interface index mapping (instant, no SNMP)
+  const ifIndex = interfaceIndexMap[iface];
+  if (!ifIndex) {
+    return res.json({ timestamp: null });
+  }
 
-  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
-    if (err || !stdout) {
-      return res.json({ timestamp: null });
-    }
+  const files = fs.readdirSync(RRD_DIR);
+  const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
 
-    let ifIndex = null;
-    const lines = stdout.split("\n").filter((l) => l.trim());
-    lines.forEach((line) => {
-      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]*)/);
-      if (match && match[2] === iface) {
-        ifIndex = match[1];
-      }
-    });
+  if (!rrdFile) {
+    return res.json({ timestamp: null });
+  }
 
-    if (!ifIndex) {
-      return res.json({ timestamp: null });
-    }
+  const rrdPath = path.join(RRD_DIR, rrdFile);
+  const cmd = spawn("rrdtool", ["lastupdate", rrdPath]);
 
-    const files = fs.readdirSync(RRD_DIR);
-    const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
+  let stdout = "";
+  cmd.stdout.on("data", (data) => {
+    stdout += data.toString();
+  });
 
-    if (!rrdFile) {
-      return res.json({ timestamp: null });
-    }
-
-    const rrdPath = path.join(RRD_DIR, rrdFile);
-    const cmd = spawn("rrdtool", ["lastupdate", rrdPath]);
-
-    let stdout2 = "";
-    cmd.stdout.on("data", (data) => {
-      stdout2 += data.toString();
-    });
-
-    cmd.on("close", (code) => {
-      if (code === 0) {
-        // Parse lastupdate output: "1234567890: 123456 789012 ..."
-        const match = stdout2.match(/(\d+):/);
-        if (match) {
-          const timestamp = parseInt(match[1], 10) * 1000; // convert to milliseconds
-          res.json({ timestamp });
-        } else {
-          res.json({ timestamp: null });
-        }
+  cmd.on("close", (code) => {
+    if (code === 0) {
+      // Parse lastupdate output: "1234567890: 123456 789012 ..."
+      const match = stdout.match(/(\d+):/);
+      if (match) {
+        const timestamp = parseInt(match[1], 10) * 1000; // convert to milliseconds
+        res.json({ timestamp });
       } else {
         res.json({ timestamp: null });
       }
-    });
-
-    cmd.on("error", () => {
+    } else {
       res.json({ timestamp: null });
-    });
+    }
+  });
+
+  cmd.on("error", () => {
+    res.json({ timestamp: null });
   });
 });
 
