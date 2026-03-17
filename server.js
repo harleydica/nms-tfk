@@ -105,6 +105,10 @@ function snmpGet(oid, callback) {
   });
 }
 
+function toSafeFilename(value) {
+  return String(value || "iface").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
 // ============================================
 // RRDtool HELPERS
 // ============================================
@@ -397,8 +401,8 @@ app.get("/api/interfaces/:ifIndex/status", (req, res) => {
 app.post("/api/interfaces/:ifIndex/monitor", (req, res) => {
   const { ifIndex } = req.params;
   const { ifName } = req.body;
-
-  const rrdPath = path.join(RRD_DIR, `${ifIndex}_${ifName}.rrd`);
+  const safeIfName = toSafeFilename(ifName);
+  const rrdPath = path.join(RRD_DIR, `${ifIndex}_${safeIfName}.rrd`);
 
   createRRD(rrdPath, (err) => {
     if (err) {
