@@ -122,9 +122,11 @@ fetch('/api/ip')
 const root = document.getElementById("list");
 
 Object.keys(INTERFACES).forEach(iface => {
+  const ifaceData = INTERFACES[iface];
+  
   const div = document.createElement("div");
   div.className = "graph-item";
-
+  
   div.innerHTML = `
     <h2>${iface}</h2>
     <a href="interface.html?iface=${encodeURIComponent(iface)}" style="display: block;">
@@ -132,7 +134,7 @@ Object.keys(INTERFACES).forEach(iface => {
     </a>
     <a href="interface.html?iface=${encodeURIComponent(iface)}">View Details →</a>
   `;
-
+  
   root.appendChild(div);
 });
 </script>

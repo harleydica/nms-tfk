@@ -41,8 +41,6 @@
       display: block;
       margin: 10px 0;
       border: 1px solid #999;
-      width: 520px;
-      max-width: 100%;
     }
 
     table.stats {
@@ -135,14 +133,6 @@ function graphUrl(type) {
   return `/api/iface/${encodeURIComponent(iface)}/graph/${type}`;
 }
 
-function toMbpsText(value) {
-  const n = Number(value || 0);
-  const mbps = n / 1000000;
-  if (!Number.isFinite(mbps)) return "-";
-  if (mbps >= 1) return `${mbps.toFixed(2)} Mbps`;
-  return `${(mbps * 1000).toFixed(2)} Kbps`;
-}
-
 async function load() {
   const res = await fetch(`/api/iface/${encodeURIComponent(iface)}/stats`);
   const stats = await res.json();
@@ -163,15 +153,15 @@ async function load() {
       <table class="stats">
         <tr>
           <td class="label in">In</td>
-          <td>Max ${toMbpsText(s.in?.max)}</td>
-          <td>Avg ${toMbpsText(s.in?.avg)}</td>
-          <td>Cur ${toMbpsText(s.in?.current)}</td>
+          <td>Max ${s.in?.max || "-"}</td>
+          <td>Avg ${s.in?.avg || "-"}</td>
+          <td>Cur ${s.in?.current || "-"}</td>
         </tr>
         <tr>
           <td class="label out">Out</td>
-          <td>Max ${toMbpsText(s.out?.max)}</td>
-          <td>Avg ${toMbpsText(s.out?.avg)}</td>
-          <td>Cur ${toMbpsText(s.out?.current)}</td>
+          <td>Max ${s.out?.max || "-"}</td>
+          <td>Avg ${s.out?.avg || "-"}</td>
+          <td>Cur ${s.out?.current || "-"}</td>
         </tr>
       </table>
     `;

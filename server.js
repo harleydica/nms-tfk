@@ -285,10 +285,10 @@ function updateRRD(rrdPath, inOctets, outOctets, inErrors, outErrors, callback) 
  */
 function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
   const graphParams = {
-    "1day": ["-s", "-1d", "-w", "1200", "-h", "600"],
-    "7day": ["-s", "-7d", "-w", "1200", "-h", "600"],
-    "30day": ["-s", "-30d", "-w", "1200", "-h", "600"],
-    "1year": ["-s", "-1y", "-w", "1200", "-h", "600"]
+    "1day": ["-s", "-1d", "-w", "520", "-h", "160"],
+    "7day": ["-s", "-7d", "-w", "520", "-h", "160"],
+    "30day": ["-s", "-30d", "-w", "520", "-h", "160"],
+    "1year": ["-s", "-1y", "-w", "520", "-h", "160"]
   };
 
   const timeParams = graphParams[timespan] || graphParams["1day"];
@@ -298,7 +298,7 @@ function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
     graphPath,
     ...timeParams,
     "--title", title,
-    "--vertical-label", "bits/sec",
+    "--vertical-label", "Mbps",
     "--right-axis-label", "Errors/sec",
     `DEF:inOctets=${rrdPath}:InOctets:AVERAGE`,
     `DEF:outOctets=${rrdPath}:OutOctets:AVERAGE`,
@@ -306,8 +306,10 @@ function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
     `DEF:outErrors=${rrdPath}:OutErrors:AVERAGE`,
     `CDEF:inBits=inOctets,8,*`,
     `CDEF:outBits=outOctets,8,*`,
-    `AREA:inBits#00CC00:"In Traffic"`,
-    `LINE2:outBits#0000FF:"Out Traffic"`,
+    `CDEF:inMbps=inBits,1000000,/`,
+    `CDEF:outMbps=outBits,1000000,/`,
+    `AREA:inMbps#00CC00:"In Traffic (Mbps)"`,
+    `LINE2:outMbps#0000FF:"Out Traffic (Mbps)"`,
     `LINE2:inErrors#FF0000:"In Errors"`,
     `LINE2:outErrors#FFAA00:"Out Errors"`
   ]);
@@ -388,6 +390,12 @@ async function initDatabase() {
 // ============================================
 // API ENDPOINTS
 // ============================================
+
+app.get("/api/ip", (req, res) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  const ip = (Array.isArray(forwarded) ? forwarded[0] : String(forwarded || "").split(",")[0]) || req.socket.remoteAddress || req.ip || "Unknown";
+  res.json({ ip: String(ip).replace("::ffff:", "") });
+});
 
 /**
  * GET /api/interfaces
