@@ -526,10 +526,6 @@ app.listen(PORT, () => {
 });
 
 export default app;
-
-/**
- * API: proxy gambar graph (gif)
- * GET /api/iface/:iface/graph/:type  (type: daily|weekly|monthly|yearly)
  */
 app.get("/api/iface/:iface/graph/:type", async (req, res) => {
   try {
