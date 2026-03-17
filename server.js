@@ -3,6 +3,10 @@ import { spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import mysql from "mysql2/promise";
+import dotenv from "dotenv";
+
+// Load environment variables from .env file
+dotenv.config();
 
 const app = express();
 app.use(express.static("public"));
