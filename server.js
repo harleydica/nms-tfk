@@ -250,6 +250,7 @@ function getInterfacesFromSnmp(callback) {
         ifIndex: itf.ifIndex,
         ifName: itf.ifName,
         ifType: "-",
+        ifMtu: "-",
         interfaceDescription: itf.ifName,
         displayName: itf.ifName,
         speedBps: 0,
@@ -303,18 +304,33 @@ function getInterfacesFromSnmp(callback) {
               });
           }
 
-          const finalInterfaces = Object.values(byIndex).map((itf) => {
-            const override = INTERFACE_DESCRIPTION_OVERRIDES[itf.ifName];
-            const finalDescription = override || itf.interfaceDescription || itf.ifName;
-            return {
-              ...itf,
-              interfaceDescription: finalDescription,
-              displayName: `${itf.ifName}-${toDisplaySuffix(finalDescription)}`
-            };
-          });
+          // ifMtu
+          snmpWalk("1.3.6.1.2.1.2.2.1.4", (mtuErr, mtuOut) => {
+            if (!mtuErr && mtuOut) {
+              mtuOut
+                .split("\n")
+                .filter((l) => l.trim())
+                .forEach((line) => {
+                  const m = line.match(/\.(\d+)\s*=\s*\w+:?\s*(\d+)/);
+                  if (m && byIndex[m[1]]) {
+                    byIndex[m[1]].ifMtu = m[2];
+                  }
+                });
+            }
 
-          cachedInterfaces = finalInterfaces; // Update cache
-          callback(null, finalInterfaces);
+            const finalInterfaces = Object.values(byIndex).map((itf) => {
+              const override = INTERFACE_DESCRIPTION_OVERRIDES[itf.ifName];
+              const finalDescription = override || itf.interfaceDescription || itf.ifName;
+              return {
+                ...itf,
+                interfaceDescription: finalDescription,
+                displayName: `${itf.ifName}-${toDisplaySuffix(finalDescription)}`
+              };
+            });
+
+            cachedInterfaces = finalInterfaces; // Update cache
+            callback(null, finalInterfaces);
+          });
         });
       });
     });
@@ -805,13 +821,15 @@ async function saveInterfacesToDB(interfaces) {
     // Upsert new interfaces
     for (const iface of interfaces) {
       const ifTypeNum = Number(String(iface.ifType || "").match(/\d+/)?.[0] || 0);
+      const ifMtuNum = Number(String(iface.ifMtu || "").match(/\d+/)?.[0] || 0);
       const speedBps = parseSpeedToBps(iface);
       await conn.execute(
-        `INSERT INTO interfaces (ifIndex, ifName, ifType, ifSpeed, ifDescription, enabled)
-         VALUES (?, ?, ?, ?, ?, 1)
+        `INSERT INTO interfaces (ifIndex, ifName, ifType, ifMtu, ifSpeed, ifDescription, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, 1)
          ON DUPLICATE KEY UPDATE
          ifName = VALUES(ifName),
          ifType = VALUES(ifType),
+         ifMtu = VALUES(ifMtu),
          ifSpeed = VALUES(ifSpeed),
          ifDescription = VALUES(ifDescription),
          enabled = 1,
@@ -820,6 +838,7 @@ async function saveInterfacesToDB(interfaces) {
           iface.ifIndex,
           iface.ifName,
           ifTypeNum,
+          ifMtuNum,
           speedBps,
           iface.interfaceDescription
         ]
@@ -840,7 +859,7 @@ async function loadInterfacesFromDB() {
   try {
     const conn = await getDBConnection();
     const [rows] = await conn.execute(
-      `SELECT ifIndex, ifName, ifType, ifSpeed, ifDescription
+      `SELECT ifIndex, ifName, ifType, ifMtu, ifSpeed, ifDescription
        FROM interfaces
        WHERE enabled = 1
        ORDER BY ifName`
@@ -850,6 +869,7 @@ async function loadInterfacesFromDB() {
       ifIndex: String(row.ifIndex),
       ifName: row.ifName,
       ifType: row.ifType ? getIfTypeDescription(row.ifType) : "-",
+      ifMtu: row.ifMtu ? `${row.ifMtu}` : "-",
       interfaceDescription: row.ifDescription || row.ifName,
       speedrate: row.ifSpeed ? (row.ifSpeed >= 1e9 ? `${(row.ifSpeed / 1e9).toFixed(1)} Gbps` : `${(row.ifSpeed / 1e6).toFixed(1)} Mbps`) : "-",
       speedBps: Number(row.ifSpeed || 0),
