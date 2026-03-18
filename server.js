@@ -19,6 +19,7 @@ const SNMP_COMMUNITY = process.env.SNMP_COMMUNITY || "public";
 const SNMP_VERSION = process.env.SNMP_VERSION || "2c";
 const RRD_DIR = process.env.RRD_DIR || "./rrd";
 const GRAPH_DIR = process.env.GRAPH_DIR || "./public/graphs";
+const GRAPH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const MONITOR_INTERFACES = (process.env.MONITOR_INTERFACES || "")
   .split(",")
   .map((s) => s.trim())
@@ -678,6 +679,16 @@ function generateGraph(rrdPath, graphPath, title, timespan = "1day", callback) {
   });
 }
 
+function isFileFresh(filePath, maxAgeMs) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const st = fs.statSync(filePath);
+    return (Date.now() - st.mtimeMs) < maxAgeMs;
+  } catch {
+    return false;
+  }
+}
+
 // ============================================
 // DATABASE HELPERS
 // ============================================
@@ -1111,14 +1122,14 @@ app.get("/api/graph/:ifIndex/:timespan", (req, res) => {
   const { ifIndex, timespan } = req.params;
   const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${timespan}.png`);
 
-  // Serve cached graph jika ada
-  if (fs.existsSync(graphPath)) {
-    console.log(`⚡ Cache HIT: ${ifIndex}_${timespan}.png`);
+  // Serve cached graph jika masih fresh (<5 menit)
+  if (isFileFresh(graphPath, GRAPH_REFRESH_INTERVAL_MS)) {
+    console.log(`⚡ Cache HIT (fresh): ${ifIndex}_${timespan}.png`);
     return res.sendFile(graphPath, { root: "." });
   }
 
-  // Jika belum ada cache, generate sekarang
-  console.log(`⏳ Cache MISS: Generating ${ifIndex}_${timespan}.png`);
+  // Jika cache stale/miss, generate sekarang
+  console.log(`⏳ Cache STALE/MISS: Generating ${ifIndex}_${timespan}.png`);
   const files = fs.readdirSync(RRD_DIR);
   const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
 
@@ -1209,12 +1220,12 @@ app.get("/api/iface/:iface/graph/:type", (req, res) => {
   const ifIndex = rrdFile.match(/^(\d+)_/)?.[1];
   const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${type}.png`);
 
-  // Serve cached graph jika ada
-  if (fs.existsSync(graphPath)) {
+  // Serve cached graph jika masih fresh (<5 menit)
+  if (isFileFresh(graphPath, GRAPH_REFRESH_INTERVAL_MS)) {
     return res.sendFile(graphPath, { root: "." });
   }
 
-  // Jika belum ada cache, generate sekarang
+  // Jika cache stale/miss, generate sekarang
   const rrdPath = path.join(RRD_DIR, rrdFile);
   const timespan = type === "daily" ? "1day" : (type === "weekly" ? "7day" : (type === "monthly" ? "30day" : "1year"));
 
