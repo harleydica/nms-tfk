@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import mysql from "mysql2/promise";
 import dotenv from "dotenv";
+import crypto from "crypto";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -396,41 +397,51 @@ function runCollectorCycle() {
     });
   });
 
-  // ===== STEP 2: Refresh interface cache every 30 minutes (not every 5 menit) =====
-  // Calculate intervals - only refresh cache every 30 min to avoid SNMP overhead
-  const now = Date.now();
-  const thirtyMinutes = 30 * 60 * 1000;
-  const timeSinceLastRefresh = now - lastInterfaceChangeTime;
-  
-  if (timeSinceLastRefresh > thirtyMinutes) {
-    console.log(`⏱️ [Collector #${Math.floor(timeSinceLastRefresh / 300000)}] Interval 30 minutes reached: refreshing interface cache from SNMP...`);
-    getInterfacesFromSnmp((err, newInterfaces) => {
-      if (err) {
-        console.error("❌ Failed to refresh interfaces:", err.message);
-        return;
-      }
+  // ===== STEP 2: Check if .env MONITOR_INTERFACES changed =====
+  checkConfigChanged().then(({ changed, newHash }) => {
+    if (changed) {
+      console.log(`🔄 [Collector] MONITOR_INTERFACES changed in .env! Running SNMP discovery...`);
+      
+      getInterfacesFromSnmp((err, newInterfaces) => {
+        if (err) {
+          console.error("❌ Failed to discover interfaces:", err.message);
+          return;
+        }
 
-      // Update cache
-      cachedInterfaces = newInterfaces;
-      lastInterfaceChangeTime = now;
-      console.log(`✓ Interface cache refreshed: ${newInterfaces.length} interfaces`);
+        // Save to database
+        saveInterfacesToDB(newInterfaces).then(() => {
+          // Update hash
+          updateConfigHash(newHash);
+          
+          // Update memory cache
+          cachedInterfaces = newInterfaces;
+          lastInterfaceChangeTime = Date.now();
+          
+          console.log(`✓ Interfaces updated (${newInterfaces.length} interfaces)`);
 
-      // Regenerate graphs for all interfaces
-      regenerateAllGraphs(() => {
-        console.log("✓ All graphs regenerated after refresh");
+          // Regenerate graphs
+          regenerateAllGraphs(() => {
+            console.log("✓ All graphs regenerated");
+          });
+        });
       });
-    });
-  } else {
-    const minutesLeft = Math.round((thirtyMinutes - timeSinceLastRefresh) / 60000);
-    console.log(`✓ [Collector] RRD updated (${files.length} files). Cache valid for ${minutesLeft} more minutes.`);
-  }
+    } else {
+      // No config change - load from database (NO SNMP!)
+      loadInterfacesFromDB().then((interfaces) => {
+        if (interfaces.length > 0) {
+          cachedInterfaces = interfaces;
+          console.log(`✓ [Collector] RRD updated (${files.length} files). Interfaces loaded from DB cache (no SNMP).`);
+        }
+      });
+    }
+  });
 }
 
 function startCollector() {
   if (collectorTimer) return;
   runCollectorCycle();
   collectorTimer = setInterval(runCollectorCycle, 300000);
-  console.log("\n📊 Collector started (every 5 minutes). Interface cache refresh: every 30 minutes.\n");
+  console.log("\n📊 Collector started (every 5 minutes).\n🔒 Config-driven discovery: Only SNMP when .env MONITOR_INTERFACES changes.\n");
 }
 
 function bootstrapRrdFromSnmp() {
@@ -448,6 +459,13 @@ function bootstrapRrdFromSnmp() {
     // Update cache immediately
     cachedInterfaces = interfaces;
     lastInterfaceChangeTime = Date.now();
+
+    // Save to database and set config hash
+    saveInterfacesToDB(interfaces).then(() => {
+      const hash = hashMonitorInterfaces();
+      updateConfigHash(hash);
+      console.log(`✓ Saved interface metadata to database`);
+    });
 
     // Create RRD files for all interfaces
     interfaces.forEach(({ ifIndex, ifName }) => {
@@ -690,6 +708,20 @@ async function initDatabase() {
       )
     `);
 
+    // Track .env configuration changes
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS config_state (
+        id INT PRIMARY KEY DEFAULT 1,
+        monitor_interfaces_hash VARCHAR(64),
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Insert default row if not exists
+    await conn.execute(`
+      INSERT IGNORE INTO config_state (id, monitor_interfaces_hash) VALUES (1, '')
+    `);
+
     await conn.end();
     console.log("Database initialized successfully");
   } catch (err) {
@@ -700,6 +732,121 @@ async function initDatabase() {
 // Cache system info (update setiap 30 menit)
 let cachedSystemInfo = {};
 let lastSystemInfoUpdate = 0;
+
+// Calculate hash of MONITOR_INTERFACES for tracking changes
+function hashMonitorInterfaces() {
+  const interfaceStr = MONITOR_INTERFACES.join(",");
+  return crypto.createHash("sha256").update(interfaceStr).digest("hex");
+}
+
+/**
+ * Check if .env MONITOR_INTERFACES changed
+ * Return: { changed: boolean, newHash: string, oldHash: string }
+ */
+async function checkConfigChanged() {
+  try {
+    const conn = await getDBConnection();
+    const [rows] = await conn.execute(
+      `SELECT monitor_interfaces_hash FROM config_state WHERE id = 1`
+    );
+    
+    const oldHash = rows[0]?.monitor_interfaces_hash || "";
+    const newHash = hashMonitorInterfaces();
+    const changed = oldHash !== newHash;
+    
+    await conn.end();
+    return { changed, newHash, oldHash };
+  } catch (err) {
+    console.error("checkConfigChanged error:", err.message);
+    return { changed: false, newHash: "", oldHash: "" };
+  }
+}
+
+/**
+ * Update config hash in database setelah interfaces berubah
+ */
+async function updateConfigHash(newHash) {
+  try {
+    const conn = await getDBConnection();
+    await conn.execute(
+      `UPDATE config_state SET monitor_interfaces_hash = ? WHERE id = 1`,
+      [newHash]
+    );
+    await conn.end();
+  } catch (err) {
+    console.error("updateConfigHash error:", err.message);
+  }
+}
+
+/**
+ * Save interfaces to database
+ */
+async function saveInterfacesToDB(interfaces) {
+  try {
+    const conn = await getDBConnection();
+    
+    // Delete old interfaces (they'll be re-inserted if still monitored)
+    await conn.execute(`DELETE FROM interfaces WHERE enabled = 0`);
+    
+    // Upsert new interfaces
+    for (const iface of interfaces) {
+      await conn.execute(
+        `INSERT INTO interfaces (ifIndex, ifName, ifType, ifSpeed, ifDescription, enabled)
+         VALUES (?, ?, ?, ?, ?, 1)
+         ON DUPLICATE KEY UPDATE
+         ifName = VALUES(ifName),
+         ifType = VALUES(ifType),
+         ifSpeed = VALUES(ifSpeed),
+         ifDescription = VALUES(ifDescription),
+         enabled = 1,
+         updated_at = CURRENT_TIMESTAMP`,
+        [
+          iface.ifIndex,
+          iface.ifName,
+          iface.ifType ? parseInt(iface.ifType.match(/\d+/)[0]) : 0,
+          parseInt(iface.speedrate?.match(/\d+/) || "0"),
+          iface.interfaceDescription
+        ]
+      );
+    }
+    
+    await conn.end();
+    console.log(`✓ Saved ${interfaces.length} interfaces to database`);
+  } catch (err) {
+    console.error("saveInterfacesToDB error:", err.message);
+  }
+}
+
+/**
+ * Load interfaces from database (only if no config change)
+ */
+async function loadInterfacesFromDB() {
+  try {
+    const conn = await getDBConnection();
+    const [rows] = await conn.execute(
+      `SELECT ifIndex, ifName, ifType, ifSpeed, ifDescription
+       FROM interfaces
+       WHERE enabled = 1
+       ORDER BY ifName`
+    );
+    
+    const interfaces = rows.map(row => ({
+      ifIndex: String(row.ifIndex),
+      ifName: row.ifName,
+      ifType: row.ifType ? `${row.ifType}` : "-",
+      interfaceDescription: row.ifDescription || row.ifName,
+      speedrate: row.ifSpeed ? (row.ifSpeed >= 1e9 ? `${(row.ifSpeed / 1e9).toFixed(1)} Gbps` : `${(row.ifSpeed / 1e6).toFixed(1)} Mbps`) : "-",
+      displayName: `${row.ifName}-${toDisplaySuffix(row.ifDescription || row.ifName)}`
+    }));
+    
+    await conn.end();
+    console.log(`✓ Loaded ${interfaces.length} interfaces from database cache`);
+    return interfaces;
+  } catch (err) {
+    console.error("loadInterfacesFromDB error:", err.message);
+    return [];
+  }
+}
 
 function updateSystemInfoCache() {
   const oids = {
