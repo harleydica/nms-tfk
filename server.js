@@ -754,10 +754,12 @@ async function checkConfigChanged() {
     const newHash = hashMonitorInterfaces();
     const changed = oldHash !== newHash;
     
+    console.log(`[Config Check] Old hash: ${oldHash.substring(0, 8)}... | New hash: ${newHash.substring(0, 8)}... | Changed: ${changed}`);
+    
     await conn.end();
     return { changed, newHash, oldHash };
   } catch (err) {
-    console.error("checkConfigChanged error:", err.message);
+    console.error("❌ checkConfigChanged error:", err.message);
     return { changed: false, newHash: "", oldHash: "" };
   }
 }
@@ -840,10 +842,10 @@ async function loadInterfacesFromDB() {
     }));
     
     await conn.end();
-    console.log(`✓ Loaded ${interfaces.length} interfaces from database cache`);
+    console.log(`✓ [DB Cache] Loaded ${interfaces.length} interfaces from database`);
     return interfaces;
   } catch (err) {
-    console.error("loadInterfacesFromDB error:", err.message);
+    console.error("❌ loadInterfacesFromDB error:", err.message);
     return [];
   }
 }
