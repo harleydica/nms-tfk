@@ -840,6 +840,12 @@ async function loadInterfacesFromDB() {
       speedrate: row.ifSpeed ? (row.ifSpeed >= 1e9 ? `${(row.ifSpeed / 1e9).toFixed(1)} Gbps` : `${(row.ifSpeed / 1e6).toFixed(1)} Mbps`) : "-",
       displayName: `${row.ifName}-${toDisplaySuffix(row.ifDescription || row.ifName)}`
     }));
+
+    // Rebuild fast lookup cache from DB data.
+    interfaceIndexMap = {};
+    interfaces.forEach((itf) => {
+      interfaceIndexMap[itf.ifName] = itf.ifIndex;
+    });
     
     await conn.end();
     console.log(`✓ [DB Cache] Loaded ${interfaces.length} interfaces from database`);
@@ -1103,77 +1109,46 @@ app.get("/api/graph/:ifIndex/:timespan", (req, res) => {
  */
 app.get("/api/iface/:iface/stats", (req, res) => {
   const { iface } = req.params;
-  let responseSent = false;
+  const emptyStats = {
+    daily: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
+    weekly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
+    monthly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
+    yearly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } }
+  };
 
-  // Cari ifIndex dari nama interface
-  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
-    if (responseSent) return;
-    
-    if (err || !stdout) {
-      responseSent = true;
-      return res.json({
-        daily: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
-        weekly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
-        monthly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
-        yearly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } }
-      });
-    }
+  const files = fs.readdirSync(RRD_DIR);
+  const mappedIfIndex = interfaceIndexMap[iface]
+    || (cachedInterfaces.find((x) => x.ifName === iface) || {}).ifIndex;
+  const safeIface = toSafeFilename(iface);
+  const rrdFile = mappedIfIndex
+    ? files.find((f) => f.startsWith(`${mappedIfIndex}_`))
+    : files.find((f) => f.includes(`_${safeIface}.rrd`));
 
-    let ifIndex = null;
-    const lines = stdout.split("\n").filter((l) => l.trim());
-    lines.forEach((line) => {
-      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]*)/);
-      if (match && match[2] === iface) {
-        ifIndex = match[1];
+  if (!rrdFile) {
+    return res.json(emptyStats);
+  }
+
+  const rrdPath = path.join(RRD_DIR, rrdFile);
+  const spans = {
+    daily: "-1d",
+    weekly: "-7d",
+    monthly: "-30d",
+    yearly: "-1y"
+  };
+
+  const out = {};
+  const keys = Object.keys(spans);
+  let done = 0;
+
+  keys.forEach((k) => {
+    fetchRrdStats(rrdPath, spans[k], (fetchErr, stats) => {
+      out[k] = fetchErr
+        ? { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } }
+        : stats;
+      done++;
+      if (done === keys.length) {
+        res.json(out);
       }
-    });
-
-    if (!ifIndex) {
-      responseSent = true;
-      return res.json({
-        daily: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
-        weekly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
-        monthly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } },
-        yearly: { in: { max: "0", avg: "0", current: "0" }, out: { max: "0", avg: "0", current: "0" } }
-      });
-    }
-
-    const files = fs.readdirSync(RRD_DIR);
-    const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
-    if (!rrdFile) {
-      responseSent = true;
-      return res.json({
-        daily: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
-        weekly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
-        monthly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } },
-        yearly: { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } }
-      });
-    }
-
-    const rrdPath = path.join(RRD_DIR, rrdFile);
-    const spans = {
-      daily: "-1d",
-      weekly: "-7d",
-      monthly: "-30d",
-      yearly: "-1y"
-    };
-
-    const out = {};
-    const keys = Object.keys(spans);
-    let done = 0;
-
-    keys.forEach((k) => {
-      fetchRrdStats(rrdPath, spans[k], (fetchErr, stats) => {
-        if (responseSent) return;
-        out[k] = fetchErr
-          ? { in: { max: 0, avg: 0, current: 0 }, out: { max: 0, avg: 0, current: 0 } }
-          : stats;
-        done++;
-        if (done === keys.length) {
-          responseSent = true;
-          res.json(out);
-        }
-      });
     });
   });
 });
@@ -1184,61 +1159,35 @@ app.get("/api/iface/:iface/stats", (req, res) => {
  */
 app.get("/api/iface/:iface/graph/:type", (req, res) => {
   const { iface, type } = req.params;
-  let responseSent = false;
+  const files = fs.readdirSync(RRD_DIR);
+  const mappedIfIndex = interfaceIndexMap[iface]
+    || (cachedInterfaces.find((x) => x.ifName === iface) || {}).ifIndex;
+  const safeIface = toSafeFilename(iface);
+  const rrdFile = mappedIfIndex
+    ? files.find((f) => f.startsWith(`${mappedIfIndex}_`))
+    : files.find((f) => f.includes(`_${safeIface}.rrd`));
 
-  // Cari ifIndex dari nama interface
-  snmpWalk("1.3.6.1.2.1.2.2.1.2", (err, stdout) => {
-    if (responseSent) return;
-    
-    if (err || !stdout) {
-      responseSent = true;
-      return res.status(404).json({ error: "Interface not found" });
+  if (!rrdFile) {
+    return res.status(404).json({ error: "RRD file not found" });
+  }
+
+  const ifIndex = rrdFile.match(/^(\d+)_/)?.[1];
+  const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${type}.png`);
+
+  // Serve cached graph jika ada
+  if (fs.existsSync(graphPath)) {
+    return res.sendFile(graphPath, { root: "." });
+  }
+
+  // Jika belum ada cache, generate sekarang
+  const rrdPath = path.join(RRD_DIR, rrdFile);
+  const timespan = type === "daily" ? "1day" : (type === "weekly" ? "7day" : (type === "monthly" ? "30day" : "1year"));
+
+  generateGraph(rrdPath, graphPath, `Traffic: ${iface}`, timespan, (err) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
     }
-
-    let ifIndex = null;
-    const lines = stdout.split("\n").filter((l) => l.trim());
-    lines.forEach((line) => {
-      const match = line.match(/\.(\d+)\s*=\s*STRING:\s*"([^"]*)/);
-      if (match && match[2] === iface) {
-        ifIndex = match[1];
-      }
-    });
-
-    if (!ifIndex) {
-      responseSent = true;
-      return res.status(404).json({ error: "Interface not found" });
-    }
-
-    const graphPath = path.join(GRAPH_DIR, `${ifIndex}_${type}.png`);
-
-    // Serve cached graph jika ada
-    if (fs.existsSync(graphPath)) {
-      responseSent = true;
-      return res.sendFile(graphPath, { root: "." });
-    }
-
-    // Jika belum ada cache, generate sekarang
-    const files = fs.readdirSync(RRD_DIR);
-    const rrdFile = files.find((f) => f.startsWith(`${ifIndex}_`));
-
-    if (!rrdFile) {
-      responseSent = true;
-      return res.status(404).json({ error: "RRD file not found" });
-    }
-
-    const rrdPath = path.join(RRD_DIR, rrdFile);
-    const timespan = type === "daily" ? "1day" : (type === "weekly" ? "7day" : (type === "monthly" ? "30day" : "1year"));
-
-    generateGraph(rrdPath, graphPath, `Traffic: ${iface}`, timespan, (err) => {
-      if (responseSent) return;
-      
-      if (err) {
-        responseSent = true;
-        return res.status(500).json({ error: err.message });
-      }
-      responseSent = true;
-      res.sendFile(graphPath, { root: "." });
-    });
+    res.sendFile(graphPath, { root: "." });
   });
 });
 
