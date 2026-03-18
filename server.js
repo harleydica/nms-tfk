@@ -400,27 +400,29 @@ function runCollectorCycle() {
   // Calculate intervals - only refresh cache every 30 min to avoid SNMP overhead
   const now = Date.now();
   const thirtyMinutes = 30 * 60 * 1000;
+  const timeSinceLastRefresh = now - lastInterfaceChangeTime;
   
-  if (now - lastInterfaceChangeTime > thirtyMinutes) {
-    console.log("🔄 Interval 30 minutes: refreshing interface cache from SNMP...");
+  if (timeSinceLastRefresh > thirtyMinutes) {
+    console.log(`⏱️ [Collector #${Math.floor(timeSinceLastRefresh / 300000)}] Interval 30 minutes reached: refreshing interface cache from SNMP...`);
     getInterfacesFromSnmp((err, newInterfaces) => {
       if (err) {
-        console.error("Failed to refresh interfaces:", err.message);
+        console.error("❌ Failed to refresh interfaces:", err.message);
         return;
       }
 
       // Update cache
       cachedInterfaces = newInterfaces;
       lastInterfaceChangeTime = now;
-      console.log(`✓ Interface cache refreshed (${newInterfaces.length} interfaces)`);
+      console.log(`✓ Interface cache refreshed: ${newInterfaces.length} interfaces`);
 
       // Regenerate graphs for all interfaces
       regenerateAllGraphs(() => {
-        console.log("✓ All graphs regenerated");
+        console.log("✓ All graphs regenerated after refresh");
       });
     });
   } else {
-    console.log(`✓ RRD updated, interface cache valid (refresh in ${Math.round((thirtyMinutes - (now - lastInterfaceChangeTime)) / 60000)} minutes)`);
+    const minutesLeft = Math.round((thirtyMinutes - timeSinceLastRefresh) / 60000);
+    console.log(`✓ [Collector] RRD updated (${files.length} files). Cache valid for ${minutesLeft} more minutes.`);
   }
 }
 
@@ -428,7 +430,7 @@ function startCollector() {
   if (collectorTimer) return;
   runCollectorCycle();
   collectorTimer = setInterval(runCollectorCycle, 300000);
-  console.log("Collector started (every 5 minutes, refresh cache every 30 minutes)");
+  console.log("\n📊 Collector started (every 5 minutes). Interface cache refresh: every 30 minutes.\n");
 }
 
 function bootstrapRrdFromSnmp() {
@@ -454,15 +456,13 @@ function bootstrapRrdFromSnmp() {
     });
 
     console.log(`✓ Bootstrap completed: ${interfaces.length} interfaces prepared`);
-    console.log(`✓ Generating initial graph cache...`);
+    console.log(`🔄 Generating initial graph cache...`);
 
-    // Generate all graphs (wait a bit for RRD creation)
-    setTimeout(() => {
-      regenerateAllGraphs(() => {
-        console.log("✓ Initial graph cache ready");
-        startCollector();
-      });
-    }, 2000);
+    // Generate all graphs immediately (RRD already created above)
+    regenerateAllGraphs(() => {
+      console.log(`✓ Initial graph cache ready. Starting collector cycle (every 5 min)...\n`);
+      startCollector();
+    });
   });
 }
 
@@ -753,6 +753,8 @@ app.get("/api/ip", (req, res) => {
  * Return cached system info (updated every 30 min)
  */
 app.get("/api/system/info", (req, res) => {
+  // Cache for 30 minutes
+  res.set("Cache-Control", "public, max-age=1800");
   res.json(cachedSystemInfo);
 });
 
@@ -790,6 +792,8 @@ app.get("/api/rrd/lastupdate/:iface", (req, res) => {
       const match = stdout.match(/(\d+):/);
       if (match) {
         const timestamp = parseInt(match[1], 10) * 1000; // convert to milliseconds
+        // Cache this response for 2 minutes (collector updates every 5 min)
+        res.set("Cache-Control", "public, max-age=120");
         res.json({ timestamp });
       } else {
         res.json({ timestamp: null });
@@ -824,6 +828,10 @@ app.get("/api/interfaces", (req, res) => {
  * Cache di-update setiap 30 menit atau saat startup
  */
 app.get("/api/interfaces/detailed", (req, res) => {
+  // Set cache headers: valid for 4 minutes (before next SNMP discovery at 30min mark)
+  res.set("Cache-Control", "public, max-age=240");
+  res.set("Expires", new Date(Date.now() + 240000).toUTCString());
+  
   // Return cache immediately (no SNMP, no database)
   res.json(cachedInterfaces);
 });
