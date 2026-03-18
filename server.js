@@ -252,6 +252,7 @@ function getInterfacesFromSnmp(callback) {
         ifType: "-",
         interfaceDescription: itf.ifName,
         displayName: itf.ifName,
+        speedBps: 0,
         speedrate: "-"
       };
     });
@@ -295,6 +296,7 @@ function getInterfacesFromSnmp(callback) {
                 if (m && byIndex[m[1]]) {
                   const bps = Number(m[2]);
                   if (Number.isFinite(bps) && bps > 0) {
+                    byIndex[m[1]].speedBps = bps;
                     byIndex[m[1]].speedrate = bps >= 1e9 ? `${(bps / 1e9).toFixed(1)} Gbps` : `${(bps / 1e6).toFixed(1)} Mbps`;
                   }
                 }
@@ -790,8 +792,20 @@ async function saveInterfacesToDB(interfaces) {
     // Delete old interfaces (they'll be re-inserted if still monitored)
     await conn.execute(`DELETE FROM interfaces WHERE enabled = 0`);
     
+    const parseSpeedToBps = (iface) => {
+      if (Number.isFinite(iface.speedBps) && iface.speedBps > 0) return iface.speedBps;
+      const txt = String(iface.speedrate || "").trim();
+      const m = txt.match(/([0-9]+(?:\.[0-9]+)?)\s*(G|M)bps/i);
+      if (!m) return 0;
+      const val = Number(m[1]);
+      if (!Number.isFinite(val)) return 0;
+      return m[2].toUpperCase() === "G" ? Math.round(val * 1e9) : Math.round(val * 1e6);
+    };
+
     // Upsert new interfaces
     for (const iface of interfaces) {
+      const ifTypeNum = Number(String(iface.ifType || "").match(/\d+/)?.[0] || 0);
+      const speedBps = parseSpeedToBps(iface);
       await conn.execute(
         `INSERT INTO interfaces (ifIndex, ifName, ifType, ifSpeed, ifDescription, enabled)
          VALUES (?, ?, ?, ?, ?, 1)
@@ -805,8 +819,8 @@ async function saveInterfacesToDB(interfaces) {
         [
           iface.ifIndex,
           iface.ifName,
-          iface.ifType ? parseInt(iface.ifType.match(/\d+/)[0]) : 0,
-          parseInt(iface.speedrate?.match(/\d+/) || "0"),
+          ifTypeNum,
+          speedBps,
           iface.interfaceDescription
         ]
       );
@@ -835,9 +849,10 @@ async function loadInterfacesFromDB() {
     const interfaces = rows.map(row => ({
       ifIndex: String(row.ifIndex),
       ifName: row.ifName,
-      ifType: row.ifType ? `${row.ifType}` : "-",
+      ifType: row.ifType ? getIfTypeDescription(row.ifType) : "-",
       interfaceDescription: row.ifDescription || row.ifName,
       speedrate: row.ifSpeed ? (row.ifSpeed >= 1e9 ? `${(row.ifSpeed / 1e9).toFixed(1)} Gbps` : `${(row.ifSpeed / 1e6).toFixed(1)} Mbps`) : "-",
+      speedBps: Number(row.ifSpeed || 0),
       displayName: `${row.ifName}-${toDisplaySuffix(row.ifDescription || row.ifName)}`
     }));
 
