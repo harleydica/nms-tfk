@@ -48,6 +48,9 @@ const DB_CONFIG = {
   connectionLimit: 5,
   queueLimit: 0
 };
+const dbPool = mysql.createPool(DB_CONFIG);
+const DB_RETRY_INTERVAL_MS = 60000;
+const BOOTSTRAP_RETRY_INTERVAL_MS = 60000;
 
 // Create necessary directories
 if (!fs.existsSync(RRD_DIR)) fs.mkdirSync(RRD_DIR, { recursive: true });
@@ -132,6 +135,10 @@ let collectorTimer = null;
 let interfaceIndexMap = {}; // Cache: ifName -> ifIndex
 let cachedInterfaces = []; // Cache: detailed interface list
 let lastInterfaceChangeTime = Date.now(); // Track when interfaces last changed (init to now to avoid SNMP on first cycle)
+let databaseInitTimer = null;
+let bootstrapRetryTimer = null;
+let bootstrapInProgress = false;
+let bootstrapCompleted = false;
 
 function parseIfDescrLine(line) {
   const match = line.match(/\.(\d+)\s*=\s*STRING:?\s*"([^"]+)"/);
@@ -428,14 +435,16 @@ function runCollectorCycle() {
         }
 
         // Save to database
-        saveInterfacesToDB(newInterfaces).then(() => {
-          // Update hash
-          updateConfigHash(newHash);
-          
+        saveInterfacesToDB(newInterfaces).then((saved) => {
+          if (saved) {
+            // Update hash
+            updateConfigHash(newHash);
+          }
+
           // Update memory cache
           cachedInterfaces = newInterfaces;
           lastInterfaceChangeTime = Date.now();
-          
+
           console.log(`✓ Interfaces updated (${newInterfaces.length} interfaces)`);
 
           // Regenerate graphs
@@ -464,14 +473,23 @@ function startCollector() {
 }
 
 function bootstrapRrdFromSnmp() {
+  if (bootstrapCompleted || bootstrapInProgress) {
+    return;
+  }
+
+  bootstrapInProgress = true;
   getInterfacesFromSnmp((err, interfaces) => {
+    bootstrapInProgress = false;
+
     if (err) {
       console.error("SNMP bootstrap failed:", err.message);
+      scheduleBootstrapRetry(err.message);
       return;
     }
 
     if (!interfaces.length) {
       console.log("No interfaces discovered from SNMP during bootstrap");
+      scheduleBootstrapRetry("no interfaces discovered");
       return;
     }
 
@@ -480,10 +498,12 @@ function bootstrapRrdFromSnmp() {
     lastInterfaceChangeTime = Date.now();
 
     // Save to database and set config hash
-    saveInterfacesToDB(interfaces).then(() => {
-      const hash = hashMonitorInterfaces();
-      updateConfigHash(hash);
-      console.log(`✓ Saved interface metadata to database`);
+    saveInterfacesToDB(interfaces).then((saved) => {
+      if (saved) {
+        const hash = hashMonitorInterfaces();
+        updateConfigHash(hash);
+        console.log(`✓ Saved interface metadata to database`);
+      }
     });
 
     // Create RRD files for all interfaces
@@ -497,6 +517,8 @@ function bootstrapRrdFromSnmp() {
 
     // Generate all graphs immediately (RRD already created above)
     regenerateAllGraphs(() => {
+      bootstrapCompleted = true;
+      clearBootstrapRetry();
       console.log(`✓ Initial graph cache ready. Starting collector cycle (every 5 min)...\n`);
       startCollector();
     });
@@ -695,7 +717,11 @@ function isFileFresh(filePath, maxAgeMs) {
 
 async function getDBConnection() {
   try {
-    return await mysql.createConnection(DB_CONFIG);
+    const conn = await dbPool.getConnection();
+    conn.end = async () => {
+      conn.release();
+    };
+    return conn;
   } catch (err) {
     console.error("DB Connection Error:", err.message);
     throw err;
@@ -753,8 +779,21 @@ async function initDatabase() {
 
     await conn.end();
     console.log("Database initialized successfully");
+    if (databaseInitTimer) {
+      clearTimeout(databaseInitTimer);
+      databaseInitTimer = null;
+    }
+    return true;
   } catch (err) {
     console.error("Database initialization error:", err.message);
+    if (!databaseInitTimer) {
+      console.log(`⏳ Retrying database initialization in ${DB_RETRY_INTERVAL_MS / 1000}s`);
+      databaseInitTimer = setTimeout(() => {
+        databaseInitTimer = null;
+        initDatabase();
+      }, DB_RETRY_INTERVAL_MS);
+    }
+    return false;
   }
 }
 
@@ -804,8 +843,10 @@ async function updateConfigHash(newHash) {
       [newHash]
     );
     await conn.end();
+    return true;
   } catch (err) {
     console.error("updateConfigHash error:", err.message);
+    return false;
   }
 }
 
@@ -858,8 +899,30 @@ async function saveInterfacesToDB(interfaces) {
     
     await conn.end();
     console.log(`✓ Saved ${interfaces.length} interfaces to database`);
+    return true;
   } catch (err) {
     console.error("saveInterfacesToDB error:", err.message);
+    return false;
+  }
+}
+
+function scheduleBootstrapRetry(reason) {
+  if (bootstrapCompleted || bootstrapRetryTimer) {
+    return;
+  }
+
+  const suffix = reason ? ` (${reason})` : "";
+  console.log(`⏳ Retrying SNMP bootstrap in ${BOOTSTRAP_RETRY_INTERVAL_MS / 1000}s${suffix}`);
+  bootstrapRetryTimer = setTimeout(() => {
+    bootstrapRetryTimer = null;
+    bootstrapRrdFromSnmp();
+  }, BOOTSTRAP_RETRY_INTERVAL_MS);
+}
+
+function clearBootstrapRetry() {
+  if (bootstrapRetryTimer) {
+    clearTimeout(bootstrapRetryTimer);
+    bootstrapRetryTimer = null;
   }
 }
 
@@ -1032,9 +1095,19 @@ app.get("/api/interfaces/detailed", (req, res) => {
   // Set cache headers: valid for 4 minutes (before next SNMP discovery at 30min mark)
   res.set("Cache-Control", "public, max-age=240");
   res.set("Expires", new Date(Date.now() + 240000).toUTCString());
-  
-  // Return cache immediately (no SNMP, no database)
-  res.json(cachedInterfaces);
+
+  if (cachedInterfaces.length) {
+    // Return cache immediately (no SNMP, no database)
+    res.json(cachedInterfaces);
+    return;
+  }
+
+  loadInterfacesFromDB().then((interfaces) => {
+    if (interfaces.length) {
+      cachedInterfaces = interfaces;
+    }
+    res.json(cachedInterfaces);
+  });
 });
 
 /**
@@ -1249,12 +1322,12 @@ app.listen(PORT, () => {
   console.log(`📁 RRD Dir: ${RRD_DIR}`);
   console.log(`📁 Graph Dir: ${GRAPH_DIR}\n`);
 
-  // Initialize database
-  initDatabase();
-  
-  // Bootstrap interfaces and start collector
-  // (startCollector will be called automatically after bootstrap completes)
-  bootstrapRrdFromSnmp();
+  // Initialize database and bootstrap interfaces.
+  // Both flows retry on timeout so the UI can recover when DB/SNMP comes back.
+  (async () => {
+    await initDatabase();
+    bootstrapRrdFromSnmp();
+  })();
 
   // Update system info cache periodically
   setInterval(updateSystemInfoCache, 1800000); // 30 minutes
